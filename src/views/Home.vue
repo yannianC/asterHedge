@@ -31,7 +31,7 @@
               <th class="col-narrow">挂单账户币种配置</th>
               <th class="col-narrow">开仓总金额</th>
               <th class="col-narrow">当前已开</th>
-              <th>单次开仓数量</th>
+              <th class="col-single-open">单次开仓数量</th>
               <th class="col-narrow">挂单账户单次数量</th>
               <th>挂单账户开仓类型</th>
               <th class="col-narrow">挂单账户预测仓位倍数</th>
@@ -85,7 +85,7 @@
               <td class="col-narrow">
                 <input type="number" v-model="item.currentAmt" placeholder="0" />
               </td>
-              <td>
+              <td class="col-single-open">
                 <input type="text" v-model="item.singleOpenAmtConfig" placeholder="100000,400000" />
               </td>
               <td class="col-narrow">
@@ -1164,12 +1164,21 @@ main {
   background: white;
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
 }
 
 .hedge-table {
   width: auto;
   border-collapse: collapse;
   min-width: auto;
+}
+
+.hedge-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background-color: #f8f9fa;
 }
 
 .hedge-table th {
@@ -1181,6 +1190,10 @@ main {
   border-bottom: 2px solid #dee2e6;
   white-space: nowrap;
   font-size: 0.9rem;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .hedge-table th.col-narrow {
@@ -1288,6 +1301,12 @@ main {
 .hedge-table td.col-mode {
   min-width: 100px;
   width: 100px;
+}
+
+/* 单次开仓数量列样式 - 设置最小宽度 */
+.hedge-table th.col-single-open,
+.hedge-table td.col-single-open {
+  min-width: 160px;
 }
 
 .hedge-table tbody tr {
