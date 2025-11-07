@@ -30,6 +30,9 @@
               <th class="col-narrow">挂单后多少时间再去吃单（ms）</th>
               <th class="col-narrow">1分钟最大波动(%)</th>
               <th class="col-narrow">盘口深度未改变时间（秒）</th>
+              <th class="col-narrow">差额暂停</th>
+              <th class="col-narrow">下单间隔</th>
+              <th class="col-narrow">帐号筛选模式</th>
               <th>校验规则</th>
               <th>操作</th>
             </tr>
@@ -48,9 +51,11 @@
               </td>
               <td class="col-narrow">
                 <input type="text" v-model="item.slaveCurrencyConfig" placeholder="sol,+" />
+                <div v-if="item.statusMsg" class="status-msg">{{ item.statusMsg }}</div>
               </td>
               <td class="col-narrow">
                 <input type="number" v-model="item.totalAmt" placeholder="300000" />
+                <div v-if="item.statusMsg" class="status-msg">{{ item.statusMsg }}</div>
               </td>
               <td class="col-narrow">
                 <input type="number" v-model="item.currentAmt" placeholder="0" />
@@ -101,6 +106,20 @@
               </td>
               <td class="col-narrow">
                 <input type="number" v-model="item.depthNotChangeLast" placeholder="0" />
+              </td>
+              <td class="col-narrow">
+                <input type="text" v-model="item.posWarn" placeholder="差额暂停" />
+              </td>
+              <td class="col-narrow">
+                <input type="text" v-model="item.dealInterval" placeholder="下单间隔" />
+              </td>
+              <td class="col-narrow">
+                <select v-model="item.filterType" class="select-type">
+                  <option :value="null">请选择</option>
+                  <option :value="1">1-从大到小</option>
+                  <option :value="2">2-从小到大</option>
+                  <option :value="3">3-随机</option>
+                </select>
               </td>
               <td>
                 <div class="validation-config">
@@ -182,12 +201,22 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 const API_BASE = 'https://sg.bicoin.com.cn/99k/v2'
+const WS_BASE = 'wss://sg.bicoin.com.cn/99k/v2'
 const hedgeList = ref([])
 const message = ref('')
 const messageType = ref('success')
+let ws = null
+
+/**
+ * 生成唯一的WebSocket类型标识
+ * @returns {String} 唯一标识字符串
+ */
+const generateUniqueType = () => {
+  return `browser_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`
+}
 
 /**
  * 获取对冲配置列表
@@ -204,11 +233,81 @@ const fetchHedgeList = async () => {
         hasCurrentCurrencyPos: item.hasCurrentCurrencyPos === 1,
         needJudgePredictPosMulti: item.needJudgePredictPosMulti === 1,
         needJudgePredictNetPosMulti: item.needJudgePredictNetPosMulti === 1,
-        needJudgeLastNotDealTime: item.needJudgeLastNotDealTime === 1
+        needJudgeLastNotDealTime: item.needJudgeLastNotDealTime === 1,
+        statusMsg: '' // WebSocket推送的状态消息
       }))
     }
   } catch (error) {
     showMessage('获取数据失败: ' + error.message, 'error')
+  }
+}
+
+/**
+ * 建立WebSocket连接
+ */
+const connectWebSocket = () => {
+  try {
+    const uniqueType = generateUniqueType()
+    const wsUrl = `${WS_BASE}/hedge/${uniqueType}`
+    
+    ws = new WebSocket(wsUrl)
+    
+    ws.onopen = () => {
+      console.log('WebSocket连接已建立')
+    }
+    
+    ws.onmessage = (event) => {
+      try {
+        const wsData = JSON.parse(event.data)
+        handleWebSocketMessage(wsData)
+      } catch (error) {
+        console.error('WebSocket消息解析失败:', error)
+      }
+    }
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket错误:', error)
+    }
+    
+    ws.onclose = () => {
+      console.log('WebSocket连接已关闭')
+      // 可以在这里实现重连逻辑
+      setTimeout(() => {
+        if (ws && ws.readyState === WebSocket.CLOSED) {
+          connectWebSocket()
+        }
+      }, 3000)
+    }
+  } catch (error) {
+    console.error('WebSocket连接失败:', error)
+  }
+}
+
+/**
+ * 处理WebSocket推送的消息
+ * @param {Object} wsData - WebSocket消息数据
+ */
+const handleWebSocketMessage = (wsData) => {
+  if (wsData.type === 'HEDGE_STATUS' && wsData.data) {
+    const { hedgeId, msg } = wsData.data
+    
+    // 查找对应的hedgeId
+    const targetItem = hedgeList.value.find(item => item.id === hedgeId)
+    
+    if (targetItem) {
+      // 将消息放到statusMsg字段中，一直显示不清除
+      targetItem.statusMsg = msg
+    }
+  }
+}
+
+/**
+ * 关闭WebSocket连接
+ */
+const closeWebSocket = () => {
+  if (ws) {
+    ws.close()
+    ws = null
   }
 }
 
@@ -274,6 +373,10 @@ const saveHedge = async (item) => {
       openModel2Interval: item.openModel2Interval,
       waveMax: item.waveMax,
       depthNotChangeLast: item.depthNotChangeLast,
+      // 新增参数字段
+      posWarn: item.posWarn,
+      dealInterval: item.dealInterval,
+      filterType: item.filterType,
       // 校验规则字段 (0-false, 1-true)
       hasCurrentCurrencyPos: item.hasCurrentCurrencyPos ? 1 : 0,
       needJudgePredictPosMulti: item.needJudgePredictPosMulti ? 1 : 0,
@@ -336,6 +439,10 @@ const addRows = (count) => {
       openModel2Interval: '',
       waveMax: '',
       depthNotChangeLast: '',
+      // 新增参数字段初始化
+      posWarn: '',
+      dealInterval: '',
+      filterType: null,
       // 校验规则字段初始化
       hasCurrentCurrencyPos: false,
       needJudgePredictPosMulti: false,
@@ -345,7 +452,8 @@ const addRows = (count) => {
       judgePredictNetPosMultiType: 1,
       judgePredictNetPosMultiVal: null,
       needJudgeLastNotDealTime: false,
-      lastNoDealTimeVal: null
+      lastNoDealTimeVal: null,
+      statusMsg: '' // WebSocket推送的状态消息
     })
   }
   showMessage(`已添加 ${count} 行新数据`, 'success')
@@ -401,9 +509,15 @@ const viewAllLogs = () => {
   window.open(`/asterHedge2/#/log`, '_blank')
 }
 
-// 组件挂载时加载数据
+// 组件挂载时加载数据并建立WebSocket连接
 onMounted(() => {
   fetchHedgeList()
+  connectWebSocket()
+})
+
+// 组件卸载时关闭WebSocket连接
+onUnmounted(() => {
+  closeWebSocket()
 })
 </script>
 
@@ -806,6 +920,31 @@ main {
 .status-switch:has(input:disabled) {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* WebSocket状态消息样式 */
+.status-msg {
+  margin-top: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  background-color: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffeaa7;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  word-break: break-all;
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>
 

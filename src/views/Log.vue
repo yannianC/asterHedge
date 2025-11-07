@@ -109,7 +109,11 @@ const fetchLogList = async () => {
   }
 }
 
-// 格式化时间
+/**
+ * 格式化时间，精确到毫秒
+ * @param {Number} timestamp - 时间戳
+ * @returns {String} 格式化后的时间字符串 YYYY-MM-DD HH:mm:ss.SSS
+ */
 const formatTime = (timestamp) => {
   const date = new Date(timestamp)
   const year = date.getFullYear()
@@ -118,7 +122,8 @@ const formatTime = (timestamp) => {
   const hours = String(date.getHours()).padStart(2, '0')
   const minutes = String(date.getMinutes()).padStart(2, '0')
   const seconds = String(date.getSeconds()).padStart(2, '0')
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+  const milliseconds = String(date.getMilliseconds()).padStart(3, '0')
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`
 }
 
 // 显示消息
@@ -364,7 +369,7 @@ main {
   white-space: nowrap;
   color: #6c757d;
   font-weight: 500;
-  width: 200px;
+  width: 220px;
 }
 
 .log-table td:last-child {
