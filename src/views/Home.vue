@@ -41,10 +41,10 @@
           </thead>
           <tbody>
             <tr v-for="(item, index) in hedgeList" :key="item.id || `new-${index}`">
-              <td class="col-narrow">
+              <td class="col-id">
                 <input type="text" v-model="item.id" disabled class="input-id" />
               </td>
-              <td>
+              <td class="col-status">
                 <label class="status-switch">
                   <input type="checkbox" :checked="item.status === 0" @change="changeStatus(item)" :disabled="!item.id" />
                   <span class="slider" :class="{ running: item.status === 0, paused: item.status === 1 }"></span>
@@ -93,7 +93,7 @@
               <td class="col-narrow">
                 <input type="text" v-model="item.masterPredictNetPositionMulti" placeholder="-7,5" />
               </td>
-              <td>
+              <td class="col-mode">
                 <select v-model="item.openModel" @change="handleOpenModelChange(item)" class="select-type">
                   <option :value="null">请选择</option>
                   <option :value="1">1</option>
@@ -230,6 +230,27 @@ const generateUniqueType = () => {
 }
 
 /**
+ * 获取或创建WebSocket唯一标识
+ * 优先从localStorage读取，不存在则生成新的并存储
+ * @returns {String} 唯一标识字符串
+ */
+const getOrCreateWSId = () => {
+  const storageKey = 'ws_unique_id'
+  let wsId = localStorage.getItem(storageKey)
+  
+  if (!wsId) {
+    // 本地没有，生成新的并存储
+    wsId = generateUniqueType()
+    localStorage.setItem(storageKey, wsId)
+    console.log('生成新的WebSocket ID:', wsId)
+  } else {
+    console.log('使用本地存储的WebSocket ID:', wsId)
+  }
+  
+  return wsId
+}
+
+/**
  * 获取对冲配置列表
  */
 const fetchHedgeList = async () => {
@@ -258,7 +279,7 @@ const fetchHedgeList = async () => {
  */
 const connectWebSocket = () => {
   try {
-    const uniqueType = generateUniqueType()
+    const uniqueType = getOrCreateWSId()
     const wsUrl = `${WS_BASE}/hedge/${uniqueType}`
     
     ws = new WebSocket(wsUrl)
@@ -295,19 +316,39 @@ const connectWebSocket = () => {
 }
 
 /**
+ * 格式化时间戳为 月-日 时:分:秒.毫秒
+ * @param {Number} timestamp - 时间戳
+ * @returns {String} 格式化后的时间字符串
+ */
+const formatTimestamp = (timestamp) => {
+  const date = new Date(timestamp)
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  const seconds = String(date.getSeconds()).padStart(2, '0')
+  const milliseconds = String(date.getMilliseconds()).padStart(3, '0')
+  return `${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`
+}
+
+/**
  * 处理WebSocket推送的消息
  * @param {Object} wsData - WebSocket消息数据
  */
 const handleWebSocketMessage = (wsData) => {
   if (wsData.type === 'HEDGE_STATUS' && wsData.data) {
-    const { hedgeId, msg } = wsData.data
+    const { hedgeId, msg, time } = wsData.data
     
     // 查找对应的hedgeId
     const targetItem = hedgeList.value.find(item => item.id === hedgeId)
     
     if (targetItem) {
+      // 格式化时间并拼接到msg前面
+      const formattedTime = time ? formatTimestamp(time) : ''
+      const displayMsg = formattedTime ? `${formattedTime} ${msg}` : msg
+      
       // 将消息放到statusMsg字段中，一直显示不清除
-      targetItem.statusMsg = msg
+      targetItem.statusMsg = displayMsg
     }
   }
 }
@@ -650,6 +691,34 @@ main {
   max-width: 90px;
 }
 
+/* ID列样式 - 宽度减半 */
+.hedge-table td.col-id {
+  width: 50px;
+  max-width: 50px;
+  padding: 0.75rem 0.25rem;
+}
+
+.hedge-table td.col-id input {
+  width: 45px;
+  min-width: 45px;
+  max-width: 45px;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.2rem;
+}
+
+/* 运行状态列样式 - 两行显示 */
+.hedge-table td.col-status {
+  width: 80px;
+  max-width: 80px;
+  padding: 0.5rem 0.3rem;
+}
+
+/* 模式列样式 - 设置最小宽度 */
+.hedge-table td.col-mode {
+  min-width: 100px;
+  width: 100px;
+}
+
 .hedge-table tbody tr {
   position: relative;
 }
@@ -877,8 +946,9 @@ main {
 /* 运行状态开关样式 */
 .status-switch {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.3rem;
   cursor: pointer;
   position: relative;
   user-select: none;
@@ -894,10 +964,10 @@ main {
 .status-switch .slider {
   position: relative;
   display: inline-block;
-  width: 50px;
-  height: 24px;
+  width: 45px;
+  height: 22px;
   background-color: #dc3545;
-  border-radius: 24px;
+  border-radius: 22px;
   transition: all 0.3s;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
@@ -905,8 +975,8 @@ main {
 .status-switch .slider::before {
   content: '';
   position: absolute;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   left: 3px;
   top: 3px;
   background-color: white;
@@ -920,7 +990,7 @@ main {
 }
 
 .status-switch input[type="checkbox"]:checked + .slider::before {
-  transform: translateX(26px);
+  transform: translateX(23px);
 }
 
 .status-switch input[type="checkbox"]:disabled + .slider {
@@ -937,9 +1007,10 @@ main {
 }
 
 .status-text {
-  font-size: 0.85rem;
+  font-size: 0.75rem;
   font-weight: 600;
-  min-width: 50px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .status-switch:has(input:disabled) {
