@@ -30,9 +30,11 @@
               <th class="col-narrow">挂单后多少时间再去吃单（ms）</th>
               <th class="col-narrow">1分钟最大波动(%)</th>
               <th class="col-narrow">盘口深度未改变时间（秒）</th>
+              <th class="col-narrow">挂单深度变动最大</th>
               <th class="col-narrow">差额暂停</th>
               <th class="col-narrow">下单间隔</th>
               <th class="col-narrow">帐号筛选模式</th>
+              <th class="col-narrow">最大延迟</th>
               <th>校验规则</th>
               <th>操作</th>
             </tr>
@@ -49,13 +51,16 @@
                   <span class="status-text">{{ item.status === 0 ? '运行中' : '暂停' }}</span>
                 </label>
               </td>
-              <td class="col-narrow">
-                <input type="text" v-model="item.slaveCurrencyConfig" placeholder="sol,+" />
-                <div v-if="item.statusMsg" class="status-msg">{{ item.statusMsg }}</div>
+              <td class="col-narrow td-with-msg" :class="{ 'has-msg': item.statusMsg }">
+                <div class="td-content">
+                  <div v-if="item.statusMsg" class="status-msg-top">{{ item.statusMsg }}</div>
+                  <input type="text" v-model="item.slaveCurrencyConfig" placeholder="sol,+" />
+                </div>
               </td>
-              <td class="col-narrow">
-                <input type="number" v-model="item.totalAmt" placeholder="300000" />
-                <div v-if="item.statusMsg" class="status-msg">{{ item.statusMsg }}</div>
+              <td class="col-narrow td-center" :class="{ 'has-msg': item.statusMsg }">
+                <div class="td-content">
+                  <input type="number" v-model="item.totalAmt" placeholder="300000" />
+                </div>
               </td>
               <td class="col-narrow">
                 <input type="number" v-model="item.currentAmt" placeholder="0" />
@@ -108,6 +113,9 @@
                 <input type="number" v-model="item.depthNotChangeLast" placeholder="0" />
               </td>
               <td class="col-narrow">
+                <input type="number" v-model="item.depthAmtMaxChange" placeholder="挂单深度变动最大" />
+              </td>
+              <td class="col-narrow">
                 <input type="text" v-model="item.posWarn" placeholder="差额暂停" />
               </td>
               <td class="col-narrow">
@@ -120,6 +128,9 @@
                   <option :value="2">2-从小到大</option>
                   <option :value="3">3-随机</option>
                 </select>
+              </td>
+              <td class="col-narrow">
+                <input type="number" v-model="item.maxDelay" placeholder="最大延迟" />
               </td>
               <td>
                 <div class="validation-config">
@@ -373,10 +384,12 @@ const saveHedge = async (item) => {
       openModel2Interval: item.openModel2Interval,
       waveMax: item.waveMax,
       depthNotChangeLast: item.depthNotChangeLast,
+      depthAmtMaxChange: item.depthAmtMaxChange,
       // 新增参数字段
       posWarn: item.posWarn,
       dealInterval: item.dealInterval,
       filterType: item.filterType,
+      maxDelay: item.maxDelay,
       // 校验规则字段 (0-false, 1-true)
       hasCurrentCurrencyPos: item.hasCurrentCurrencyPos ? 1 : 0,
       needJudgePredictPosMulti: item.needJudgePredictPosMulti ? 1 : 0,
@@ -439,10 +452,12 @@ const addRows = (count) => {
       openModel2Interval: '',
       waveMax: '',
       depthNotChangeLast: '',
+      depthAmtMaxChange: '',
       // 新增参数字段初始化
       posWarn: '',
       dealInterval: '',
       filterType: null,
+      maxDelay: '',
       // 校验规则字段初始化
       hasCurrentCurrencyPos: false,
       needJudgePredictPosMulti: false,
@@ -635,6 +650,10 @@ main {
   max-width: 90px;
 }
 
+.hedge-table tbody tr {
+  position: relative;
+}
+
 .hedge-table tbody tr:hover {
   background-color: #f8f9fa;
 }
@@ -646,6 +665,12 @@ main {
   border-radius: 4px;
   font-size: 0.9rem;
   transition: border-color 0.3s;
+}
+
+/* 挂单账户币种配置和开仓总金额列的输入框居中 */
+.hedge-table .td-with-msg input,
+.hedge-table .td-center input {
+  text-align: center !important;
 }
 
 .hedge-table input:focus {
@@ -922,9 +947,34 @@ main {
   opacity: 0.6;
 }
 
-/* WebSocket状态消息样式 */
-.status-msg {
-  margin-top: 0.3rem;
+/* WebSocket状态消息样式 - 显示在输入框上方 */
+.td-with-msg {
+  position: relative;
+  vertical-align: middle;
+}
+
+.td-center {
+  vertical-align: middle;
+}
+
+.td-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  position: relative;
+}
+
+.td-content input {
+  width: 100%;
+}
+
+.status-msg-top {
+  position: absolute;
+  bottom: calc(100% + 0.3rem);
+  left: 50%;
+  transform: translateX(-25%);
   padding: 0.3rem 0.5rem;
   background-color: #fff3cd;
   color: #856404;
@@ -932,18 +982,22 @@ main {
   border-radius: 4px;
   font-size: 0.75rem;
   line-height: 1.2;
-  word-break: break-all;
+  white-space: nowrap;
+  z-index: 10;
   animation: fadeIn 0.3s ease-in;
+  text-align: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  min-width: 200px;
 }
 
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(-5px);
+    transform: translateX(-25%) translateY(-5px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateX(-25%) translateY(0);
   }
 }
 </style>
