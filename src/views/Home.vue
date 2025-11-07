@@ -1,10 +1,24 @@
 <template>
   <div id="home">
       <main>
+        <!-- WebSocket断开提示 -->
+        <div v-if="wsDisconnected" class="ws-disconnect-alert">
+          <span class="alert-icon">⚠️</span>
+          <span class="alert-text">WebSocket连接已断开超过3分钟（断开时间: {{ wsDisconnectTime }}），正在尝试重连...</span>
+        </div>
+        
         <div class="action-buttons">
           <button @click="addRows(10)" class="btn-add">新增对冲10列</button>
           <button @click="addRows(1)" class="btn-add">新增对冲1列</button>
           <button @click="refreshData" class="btn-refresh">刷新数据</button>
+          <label class="switch-label">
+            <input type="checkbox" v-model="smallEndAlertEnabled" @change="saveAlertSettings" />
+            <span class="switch-text">单次完成提醒</span>
+          </label>
+          <label class="switch-label">
+            <input type="checkbox" v-model="allEndAlertEnabled" @change="saveAlertSettings" />
+            <span class="switch-text">全部完成提醒</span>
+          </label>
           <!-- <button @click="viewAllLogs" class="btn-all-log">查看所有日志</button> -->
         </div>
 
@@ -34,9 +48,8 @@
               <th class="col-narrow">差额暂停</th>
               <th class="col-narrow">下单间隔</th>
               <th class="col-narrow">帐号筛选模式</th>
-              <th class="col-narrow">最大延迟</th>
+              <th class="col-narrow">账户ip最大延时</th>
               <th>校验规则</th>
-              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -45,19 +58,26 @@
                 <input type="text" v-model="item.id" disabled class="input-id" />
               </td>
               <td class="col-status">
-                <label class="status-switch">
-                  <input type="checkbox" :checked="item.status === 0" @change="changeStatus(item)" :disabled="!item.id" />
-                  <span class="slider" :class="{ running: item.status === 0, paused: item.status === 1 }"></span>
-                  <span class="status-text">{{ item.status === 0 ? '运行中' : '暂停' }}</span>
-                </label>
+                <div class="status-column">
+                  <label class="status-switch">
+                    <input type="checkbox" :checked="item.status === 0" @change="changeStatus(item)" :disabled="!item.id" />
+                    <span class="slider" :class="{ running: item.status === 0, paused: item.status === 1 }"></span>
+                    <span class="status-text">{{ item.status === 0 ? '运行中' : '暂停' }}</span>
+                  </label>
+                  <div class="action-buttons-vertical">
+                    <button @click="saveHedge(item)" class="btn-save-small">保存</button>
+                    <button @click="viewLog(item.id)" class="btn-log-small" :disabled="!item.id">日志</button>
+                  </div>
+                </div>
               </td>
-              <td class="col-narrow td-with-msg" :class="{ 'has-msg': item.statusMsg }">
+              <td class="col-narrow td-with-msg" :class="{ 'has-msg': item.statusMsg, 'has-deal': item.dealInfoDisplay }">
                 <div class="td-content">
                   <div v-if="item.statusMsg" class="status-msg-top">{{ item.statusMsg }}</div>
                   <input type="text" v-model="item.slaveCurrencyConfig" placeholder="sol,+" />
+                  <div v-if="item.dealInfoDisplay" class="deal-info-bottom">{{ item.dealInfoDisplay }}</div>
                 </div>
               </td>
-              <td class="col-narrow td-center" :class="{ 'has-msg': item.statusMsg }">
+              <td class="col-narrow td-center" :class="{ 'has-msg': item.statusMsg, 'has-deal': item.dealInfoDisplay }">
                 <div class="td-content">
                   <input type="number" v-model="item.totalAmt" placeholder="300000" />
                 </div>
@@ -130,7 +150,7 @@
                 </select>
               </td>
               <td class="col-narrow">
-                <input type="number" v-model="item.maxDelay" placeholder="最大延迟" />
+                <input type="number" v-model="item.maxDelay" placeholder="账户ip最大延时" />
               </td>
               <td>
                 <div class="validation-config">
@@ -190,12 +210,6 @@
                   </div> -->
                 </div>
               </td>
-              <td>
-                <div class="action-group">
-                  <button @click="saveHedge(item)" class="btn-save">保存</button>
-                  <button @click="viewLog(item.id)" class="btn-log" :disabled="!item.id">日志</button>
-                </div>
-              </td>
             </tr>
           </tbody>
         </table>
@@ -220,6 +234,28 @@ const hedgeList = ref([])
 const message = ref('')
 const messageType = ref('success')
 let ws = null
+
+// 音频提醒开关状态
+const smallEndAlertEnabled = ref(false)
+const allEndAlertEnabled = ref(false)
+
+// 音频播放相关
+let smallEndAudio = null
+let allEndAudio = null
+let smallEndTimer = null
+let allEndTimer = null
+let wsDisconnectAudio = null
+let wsDisconnectTimer = null
+
+// WebSocket断开提示
+const wsDisconnected = ref(false)
+const wsDisconnectTime = ref(null)
+
+// 记录已播放的ALL_FINISH的finishTime
+const lastPlayedFinishTime = ref(null)
+
+// 音频上下文是否已激活
+let audioContextActivated = false
 
 /**
  * 生成唯一的WebSocket类型标识
@@ -251,6 +287,21 @@ const getOrCreateWSId = () => {
 }
 
 /**
+ * 格式化交易信息显示
+ * @param {Object} dealInfo - 交易信息对象 {lastUAmount, time}
+ * @returns {String} 格式化后的显示文本
+ */
+const formatDealInfo = (dealInfo) => {
+  if (!dealInfo || !dealInfo.time) {
+    return ''
+  }
+  
+  const formattedTime = formatTimestamp(dealInfo.time)
+  const amount = dealInfo.lastUAmount || 0
+  return `${formattedTime} 成交量:${amount}`
+}
+
+/**
  * 获取对冲配置列表
  */
 const fetchHedgeList = async () => {
@@ -266,7 +317,8 @@ const fetchHedgeList = async () => {
         needJudgePredictPosMulti: item.needJudgePredictPosMulti === 1,
         needJudgePredictNetPosMulti: item.needJudgePredictNetPosMulti === 1,
         needJudgeLastNotDealTime: item.needJudgeLastNotDealTime === 1,
-        statusMsg: '' // WebSocket推送的状态消息
+        statusMsg: '', // WebSocket推送的状态消息
+        dealInfoDisplay: formatDealInfo(item.dealInfo) // 格式化交易信息显示
       }))
     }
   } catch (error) {
@@ -285,7 +337,28 @@ const connectWebSocket = () => {
     ws = new WebSocket(wsUrl)
     
     ws.onopen = () => {
-      console.log('WebSocket连接已建立')
+      console.log('WebSocket连接已建立，停止所有断开提醒')
+      
+      // 连接成功，清除断开定时器和提示
+      if (wsDisconnectTimer) {
+        clearTimeout(wsDisconnectTimer)
+        wsDisconnectTimer = null
+      }
+      
+      // 清除断开提示
+      wsDisconnected.value = false
+      wsDisconnectTime.value = null
+      
+      // 停止断开提醒音
+      if (wsDisconnectAudio) {
+        console.log('停止WebSocket断开提醒音')
+        try {
+          wsDisconnectAudio.stop()
+        } catch (error) {
+          console.error('停止WebSocket断开音频失败:', error)
+        }
+        wsDisconnectAudio = null
+      }
     }
     
     ws.onmessage = (event) => {
@@ -303,7 +376,16 @@ const connectWebSocket = () => {
     
     ws.onclose = () => {
       console.log('WebSocket连接已关闭')
-      // 可以在这里实现重连逻辑
+      
+      // 设置3分钟定时器
+      if (wsDisconnectTimer) {
+        clearTimeout(wsDisconnectTimer)
+      }
+      wsDisconnectTimer = setTimeout(() => {
+        handleWsDisconnectTimeout()
+      }, 180000) // 3分钟 = 180000毫秒
+      
+      // 3秒后尝试重连
       setTimeout(() => {
         if (ws && ws.readyState === WebSocket.CLOSED) {
           connectWebSocket()
@@ -332,10 +414,310 @@ const formatTimestamp = (timestamp) => {
 }
 
 /**
+ * 创建带旋律的循环提示音
+ * @param {Number} duration - 持续时间（毫秒）
+ * @param {Array} melody - 旋律数组，每个元素是 {freq: 频率, duration: 持续时间(ms)}
+ * @returns {Object} 包含播放和停止方法的对象
+ */
+const createMelodyAlertSound = (duration, melody) => {
+  let audioContext = null
+  let oscillator = null
+  let gainNode = null
+  let isPlaying = false
+  let melodyTimer = null
+  let stopTimer = null
+  
+  const playMelodyLoop = () => {
+    if (!isPlaying) return
+    
+    let currentTime = audioContext.currentTime
+    let totalMelodyDuration = 0
+    
+    // 计算整个旋律的总时长
+    melody.forEach(note => {
+      totalMelodyDuration += note.duration
+    })
+    
+    // 播放旋律，处理音量来实现静音效果
+    melody.forEach(note => {
+      // 如果频率为0，表示静音，将音量设为0
+      if (note.freq === 0) {
+        gainNode.gain.setValueAtTime(0, currentTime)
+      } else {
+        gainNode.gain.setValueAtTime(0.3, currentTime)
+        oscillator.frequency.setValueAtTime(note.freq, currentTime)
+      }
+      currentTime += note.duration / 1000
+    })
+    
+    // 在旋律结束后重新开始循环
+    melodyTimer = setTimeout(() => {
+      if (isPlaying) {
+        playMelodyLoop()
+      }
+    }, totalMelodyDuration)
+  }
+  
+  const play = () => {
+    try {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)()
+      oscillator = audioContext.createOscillator()
+      gainNode = audioContext.createGain()
+      
+      oscillator.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+      
+      // 设置提示音参数
+      oscillator.type = 'sine'
+      // 设置初始频率（使用旋律的第一个音符）
+      const firstNote = melody.find(note => note.freq > 0)
+      if (firstNote) {
+        oscillator.frequency.setValueAtTime(firstNote.freq, audioContext.currentTime)
+      }
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime) // 音量30%
+      
+      oscillator.start()
+      isPlaying = true
+      
+      // 开始播放旋律循环
+      playMelodyLoop()
+      
+      // 持续播放指定时间后停止
+      stopTimer = setTimeout(() => {
+        stop()
+      }, duration)
+    } catch (error) {
+      console.error('音频播放失败:', error)
+    }
+  }
+  
+  const stop = () => {
+    try {
+      isPlaying = false
+      
+      if (melodyTimer) {
+        clearTimeout(melodyTimer)
+        melodyTimer = null
+      }
+      
+      if (stopTimer) {
+        clearTimeout(stopTimer)
+        stopTimer = null
+      }
+      
+      if (oscillator) {
+        try {
+          oscillator.stop()
+        } catch (e) {
+          // oscillator可能已经停止，忽略错误
+        }
+        try {
+          oscillator.disconnect()
+        } catch (e) {
+          // 忽略断开连接错误
+        }
+        oscillator = null
+      }
+      if (gainNode) {
+        try {
+          gainNode.disconnect()
+        } catch (e) {
+          // 忽略断开连接错误
+        }
+        gainNode = null
+      }
+      if (audioContext) {
+        try {
+          audioContext.close()
+        } catch (e) {
+          // 忽略关闭错误
+        }
+        audioContext = null
+      }
+    } catch (error) {
+      console.error('音频停止失败:', error)
+    }
+  }
+  
+  return { play, stop }
+}
+
+// 定义三种不同的旋律
+// 旋律1: 单次完成提醒(SINGLE_FINISH) - 轻快的双音提示
+const smallEndMelody = [
+  { freq: 800, duration: 200 },
+  { freq: 1000, duration: 200 },
+  { freq: 0, duration: 400 }  // 静音间隔
+]
+
+// 旋律2: 全部完成提醒(ALL_FINISH) - 三连音上升
+const allEndMelody = [
+  { freq: 600, duration: 150 },
+  { freq: 800, duration: 150 },
+  { freq: 1000, duration: 150 },
+  { freq: 0, duration: 350 }  // 静音间隔
+]
+
+// 旋律3: WebSocket断开提醒 - 紧急的双音下降
+const wsDisconnectMelody = [
+  { freq: 900, duration: 300 },
+  { freq: 700, duration: 300 },
+  { freq: 0, duration: 200 }  // 静音间隔
+]
+
+/**
+ * 播放单次完成提醒音（10秒）- 轻快的双音提示
+ * 对应SINGLE_FINISH消息
+ */
+const playSmallEndAlert = () => {
+  console.log('playSmallEndAlert被调用，开关状态:', smallEndAlertEnabled.value)
+  
+  if (!smallEndAlertEnabled.value) {
+    console.warn('单次完成提醒开关未开启，跳过播放')
+    return
+  }
+  
+  // 停止之前的播放
+  if (smallEndAudio) {
+    console.log('停止之前的单次完成提醒音')
+    smallEndAudio.stop()
+  }
+  if (smallEndTimer) {
+    clearTimeout(smallEndTimer)
+  }
+  
+  console.log('开始播放单次完成提醒音（10秒）- 轻快双音')
+  try {
+    smallEndAudio = createMelodyAlertSound(10000, smallEndMelody)
+    smallEndAudio.play()
+    console.log('单次完成提醒音播放成功')
+  } catch (error) {
+    console.error('单次完成提醒音播放失败:', error)
+  }
+}
+
+/**
+ * 播放全部完成提醒音（5分钟）- 三连音上升
+ * 对应ALL_FINISH消息
+ */
+const playAllEndAlert = () => {
+  if (!allEndAlertEnabled.value) return
+  
+  // 停止之前的播放
+  if (allEndAudio) {
+    allEndAudio.stop()
+  }
+  if (allEndTimer) {
+    clearTimeout(allEndTimer)
+  }
+  
+  console.log('播放全部完成提醒音（5分钟）- 三连音上升')
+  allEndAudio = createMelodyAlertSound(300000, allEndMelody)
+  allEndAudio.play()
+}
+
+/**
+ * 播放WebSocket断开提醒音（2分钟）- 紧急双音下降
+ */
+const playWsDisconnectAlert = () => {
+  // 停止之前的播放
+  if (wsDisconnectAudio) {
+    console.log('停止之前的WebSocket断开提醒音')
+    try {
+      wsDisconnectAudio.stop()
+    } catch (error) {
+      console.error('停止之前的音频失败:', error)
+    }
+    wsDisconnectAudio = null
+  }
+  
+  console.log('播放WebSocket断开提醒音（2分钟）- 紧急双音下降')
+  wsDisconnectAudio = createMelodyAlertSound(120000, wsDisconnectMelody)
+  wsDisconnectAudio.play()
+  
+  // 显示断开提示
+  wsDisconnected.value = true
+  wsDisconnectTime.value = new Date().toLocaleString()
+}
+
+/**
+ * 处理WebSocket断开超过3分钟
+ */
+const handleWsDisconnectTimeout = () => {
+  console.warn('WebSocket断开超过3分钟未重连')
+  playWsDisconnectAlert()
+  showMessage('WebSocket连接已断开超过3分钟，请检查网络连接', 'error')
+}
+
+/**
+ * 激活音频上下文
+ * 浏览器要求用户交互后才能播放音频
+ */
+const activateAudioContext = async () => {
+  if (audioContextActivated) return
+  
+  try {
+    // 创建一个临时的AudioContext来激活
+    const tempContext = new (window.AudioContext || window.webkitAudioContext)()
+    
+    // 播放一个极短的静音来激活音频
+    const tempOscillator = tempContext.createOscillator()
+    const tempGain = tempContext.createGain()
+    tempGain.gain.setValueAtTime(0, tempContext.currentTime) // 静音
+    tempOscillator.connect(tempGain)
+    tempGain.connect(tempContext.destination)
+    tempOscillator.start()
+    tempOscillator.stop(tempContext.currentTime + 0.01)
+    
+    // 等待一下然后关闭
+    setTimeout(() => {
+      tempContext.close()
+    }, 100)
+    
+    audioContextActivated = true
+    console.log('音频上下文已激活')
+  } catch (error) {
+    console.error('激活音频上下文失败:', error)
+  }
+}
+
+/**
+ * 保存提醒设置到localStorage
+ */
+const saveAlertSettings = () => {
+  localStorage.setItem('smallEndAlertEnabled', smallEndAlertEnabled.value ? '1' : '0')
+  localStorage.setItem('allEndAlertEnabled', allEndAlertEnabled.value ? '1' : '0')
+  
+  // 用户勾选时激活音频上下文
+  if (smallEndAlertEnabled.value || allEndAlertEnabled.value) {
+    activateAudioContext()
+  }
+}
+
+/**
+ * 从localStorage加载提醒设置
+ */
+const loadAlertSettings = () => {
+  const smallEnabled = localStorage.getItem('smallEndAlertEnabled')
+  const allEnabled = localStorage.getItem('allEndAlertEnabled')
+  
+  smallEndAlertEnabled.value = smallEnabled === '1'
+  allEndAlertEnabled.value = allEnabled === '1'
+  
+  // 如果有提醒开关被启用，提示用户需要点击页面来激活音频
+  if (smallEndAlertEnabled.value || allEndAlertEnabled.value) {
+    setTimeout(() => {
+      showMessage('提醒功能已启用，请点击页面任意位置激活音频', 'info')
+    }, 500)
+  }
+}
+
+/**
  * 处理WebSocket推送的消息
  * @param {Object} wsData - WebSocket消息数据
  */
 const handleWebSocketMessage = (wsData) => {
+  // 处理HEDGE_STATUS类型消息
   if (wsData.type === 'HEDGE_STATUS' && wsData.data) {
     const { hedgeId, msg, time } = wsData.data
     
@@ -349,6 +731,28 @@ const handleWebSocketMessage = (wsData) => {
       
       // 将消息放到statusMsg字段中，一直显示不清除
       targetItem.statusMsg = displayMsg
+    }
+  }
+  
+  // 处理SINGLE_FINISH类型消息 - 播放10秒提示音
+  if (wsData.type === 'SINGLE_FINISH') {
+    console.log('收到SINGLE_FINISH消息，准备播放10秒提示音')
+    playSmallEndAlert()
+  }
+  
+  // 处理ALL_FINISH类型消息 - 播放5分钟提示音
+  if (wsData.type === 'ALL_FINISH' && wsData.data) {
+    const { finishTime } = wsData.data
+    
+    console.log('收到ALL_FINISH消息，finishTime:', finishTime)
+    
+    // 检查是否是新的finishTime
+    if (finishTime && finishTime !== lastPlayedFinishTime.value) {
+      console.log('新的finishTime，播放提示音')
+      lastPlayedFinishTime.value = finishTime
+      playAllEndAlert()
+    } else {
+      console.log('相同的finishTime，跳过播放')
     }
   }
 }
@@ -460,7 +864,7 @@ const saveHedge = async (item) => {
     showMessage(item.id ? '更新成功' : '新增成功', 'success')
     
     // 刷新列表
-    await fetchHedgeList()
+    // await fetchHedgeList()
   } catch (error) {
     showMessage('保存失败: ' + error.message, 'error')
   }
@@ -509,7 +913,8 @@ const addRows = (count) => {
       judgePredictNetPosMultiVal: null,
       needJudgeLastNotDealTime: false,
       lastNoDealTimeVal: null,
-      statusMsg: '' // WebSocket推送的状态消息
+      statusMsg: '', // WebSocket推送的状态消息
+      dealInfoDisplay: '' // 交易信息显示
     })
   }
   showMessage(`已添加 ${count} 行新数据`, 'success')
@@ -544,6 +949,11 @@ const showMessage = (msg, type = 'success') => {
  * 手动刷新数据
  */
 const refreshData = () => {
+  // 用户点击时激活音频上下文
+  if (smallEndAlertEnabled.value || allEndAlertEnabled.value) {
+    activateAudioContext()
+  }
+  
   fetchHedgeList()
   showMessage('数据已刷新', 'success')
 }
@@ -565,15 +975,55 @@ const viewAllLogs = () => {
   window.open(`/asterHedge2/#/log`, '_blank')
 }
 
+/**
+ * 全局点击事件处理函数，用于激活音频上下文
+ */
+const handleGlobalClick = () => {
+  if (smallEndAlertEnabled.value || allEndAlertEnabled.value) {
+    activateAudioContext()
+    // 激活后移除监听器
+    if (audioContextActivated) {
+      document.removeEventListener('click', handleGlobalClick)
+    }
+  }
+}
+
 // 组件挂载时加载数据并建立WebSocket连接
 onMounted(() => {
   fetchHedgeList()
   connectWebSocket()
+  loadAlertSettings() // 加载提醒设置
+  
+  // 添加全局点击监听器用于激活音频上下文
+  document.addEventListener('click', handleGlobalClick)
 })
 
-// 组件卸载时关闭WebSocket连接
+// 组件卸载时关闭WebSocket连接和清理音频资源
 onUnmounted(() => {
   closeWebSocket()
+  
+  // 移除全局点击监听器
+  document.removeEventListener('click', handleGlobalClick)
+  
+  // 清理音频资源
+  if (smallEndAudio) {
+    smallEndAudio.stop()
+  }
+  if (allEndAudio) {
+    allEndAudio.stop()
+  }
+  if (wsDisconnectAudio) {
+    wsDisconnectAudio.stop()
+  }
+  if (smallEndTimer) {
+    clearTimeout(smallEndTimer)
+  }
+  if (allEndTimer) {
+    clearTimeout(allEndTimer)
+  }
+  if (wsDisconnectTimer) {
+    clearTimeout(wsDisconnectTimer)
+  }
 })
 </script>
 
@@ -582,6 +1032,40 @@ main {
   max-width: 100%;
   margin: 0 auto;
   padding: 2rem;
+}
+
+/* WebSocket断开提示样式 */
+.ws-disconnect-alert {
+  background-color: #f8d7da;
+  color: #721c24;
+  border: 2px solid #f5c6cb;
+  border-radius: 8px;
+  padding: 1rem 1.5rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: 0 4px 12px rgba(220, 53, 69, 0.3);
+  animation: alertPulse 2s ease-in-out infinite;
+}
+
+.alert-icon {
+  font-size: 1.5rem;
+}
+
+.alert-text {
+  font-size: 1rem;
+  font-weight: 600;
+  flex: 1;
+}
+
+@keyframes alertPulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.85;
+  }
 }
 
 .action-buttons {
@@ -624,6 +1108,37 @@ main {
   background-color: #138496;
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(23, 162, 184, 0.4);
+}
+
+/* 提醒开关样式 */
+.switch-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  user-select: none;
+}
+
+.switch-label:hover {
+  background-color: #e9ecef;
+}
+
+.switch-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #28a745;
+}
+
+.switch-text {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #495057;
+  white-space: nowrap;
 }
 
 .btn-all-log {
@@ -706,11 +1221,67 @@ main {
   padding: 0.4rem 0.2rem;
 }
 
-/* 运行状态列样式 - 两行显示 */
+/* 运行状态列样式 - 包含开关和按钮 */
 .hedge-table td.col-status {
-  width: 80px;
-  max-width: 80px;
+  width: 120px;
+  max-width: 120px;
   padding: 0.5rem 0.3rem;
+}
+
+.status-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.action-buttons-vertical {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  width: 100%;
+}
+
+.btn-save-small,
+.btn-log-small {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.btn-save-small {
+  background-color: #28a745;
+  color: white;
+}
+
+.btn-save-small:hover {
+  background-color: #218838;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(40, 167, 69, 0.3);
+}
+
+.btn-log-small {
+  background-color: #ffc107;
+  color: #000;
+}
+
+.btn-log-small:hover:not(:disabled) {
+  background-color: #e0a800;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(255, 193, 7, 0.3);
+}
+
+.btn-log-small:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 /* 模式列样式 - 设置最小宽度 */
@@ -781,53 +1352,6 @@ main {
   cursor: not-allowed;
 }
 
-.action-group {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: nowrap;
-}
-
-.btn-save {
-  background-color: #28a745;
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.3s;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.btn-save:hover {
-  background-color: #218838;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);
-}
-
-.btn-log {
-  background-color: #ffc107;
-  color: #000;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.3s;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.btn-log:hover:not(:disabled) {
-  background-color: #e0a800;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(255, 193, 7, 0.3);
-}
-
-.btn-log:disabled {
-  background-color: #ccc;
-  cursor: not-allowed;
-  opacity: 0.6;
-}
 
 .empty-state {
   text-align: center;
@@ -1046,13 +1570,13 @@ main {
   bottom: calc(100% + 0.3rem);
   left: 50%;
   transform: translateX(-25%);
-  padding: 0.3rem 0.5rem;
+  padding: 0.4rem 0.6rem;
   background-color: #fff3cd;
   color: #856404;
   border: 1px solid #ffeaa7;
   border-radius: 4px;
-  font-size: 0.75rem;
-  line-height: 1.2;
+  font-size: 0.85rem;
+  line-height: 1.3;
   white-space: nowrap;
   z-index: 10;
   animation: fadeIn 0.3s ease-in;
@@ -1061,14 +1585,33 @@ main {
   min-width: 200px;
 }
 
+/* 交易信息显示 - 显示在输入框下方，居中横跨两列 */
+.deal-info-bottom {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  left: 50%;
+  transform: translateX(-25%);
+  padding: 0.4rem 0.6rem;
+  background-color: #d1ecf1;
+  color: #0c5460;
+  border: 1px solid #bee5eb;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  animation: fadeIn 0.3s ease-in;
+  z-index: 10;
+  min-width: 200px;
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateX(-25%) translateY(-5px);
   }
   to {
     opacity: 1;
-    transform: translateX(-25%) translateY(0);
   }
 }
 </style>

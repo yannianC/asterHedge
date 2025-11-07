@@ -29,7 +29,7 @@
         </div>
       </div>
 
-      <div class="pagination" v-if="totalPages > 1">
+      <div class="pagination" >
         <button @click="goToPage(1)" :disabled="page === 1" class="btn-page">首页</button>
         <button @click="goToPage(page - 1)" :disabled="page === 1" class="btn-page">上一页</button>
         <span class="page-info">第 {{ page }} / {{ totalPages }} 页，共 {{ total }} 条</span>
