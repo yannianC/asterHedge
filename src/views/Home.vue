@@ -53,6 +53,15 @@
             </tr>
           </thead>
           <tbody>
+            <!-- 总计行 -->
+            <tr v-if="hedgeList.length > 0" class="total-row">
+              <td class="col-id total-label">总计</td>
+              <td class="col-status"></td>
+              <td class="col-narrow"></td>
+              <td class="col-narrow"></td>
+              <td class="col-current-amt total-value">{{ totalCurrentAmt.toFixed(2) }}</td>
+              <td colspan="19"></td>
+            </tr>
             <tr v-for="(item, index) in hedgeList" :key="item.id || `new-${index}`">
               <td class="col-id">
                 <input type="text" v-model="item.id" disabled class="input-id" />
@@ -82,8 +91,11 @@
                   <input type="number" v-model="item.totalAmt" placeholder="300000" />
                 </div>
               </td>
-              <td class="col-narrow">
-                <input type="number" v-model="item.currentAmt" placeholder="0" />
+              <td class="col-narrow col-current-amt">
+                <div class="current-amt-container">
+                  <input type="number" v-model="item.currentAmt" placeholder="0" />
+                  <button @click="cleanCurrentOpen(item)" class="btn-clean" :disabled="!item.id">清零</button>
+                </div>
               </td>
               <td class="col-single-open">
                 <input type="text" v-model="item.singleOpenAmtConfig" placeholder="100000,400000" />
@@ -226,7 +238,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const API_BASE = 'https://sg.bicoin.com.cn/99k/v2'
 const WS_BASE = 'wss://sg.bicoin.com.cn/99k/v2'
@@ -234,6 +246,16 @@ const hedgeList = ref([])
 const message = ref('')
 const messageType = ref('success')
 let ws = null
+
+/**
+ * 计算"当前已开"的总和
+ */
+const totalCurrentAmt = computed(() => {
+  return hedgeList.value.reduce((sum, item) => {
+    const amt = parseFloat(item.currentAmt) || 0
+    return sum + amt
+  }, 0)
+})
 
 // 音频提醒开关状态
 const smallEndAlertEnabled = ref(false)
@@ -704,6 +726,13 @@ const loadAlertSettings = () => {
   smallEndAlertEnabled.value = smallEnabled === '1'
   allEndAlertEnabled.value = allEnabled === '1'
   
+  // 加载上次播放的finishTime
+  const savedFinishTime = localStorage.getItem('lastPlayedFinishTime')
+  if (savedFinishTime) {
+    lastPlayedFinishTime.value = parseInt(savedFinishTime)
+    console.log('加载上次播放的finishTime:', lastPlayedFinishTime.value)
+  }
+  
   // 如果有提醒开关被启用，提示用户需要点击页面来激活音频
   if (smallEndAlertEnabled.value || allEndAlertEnabled.value) {
     setTimeout(() => {
@@ -750,6 +779,9 @@ const handleWebSocketMessage = (wsData) => {
     if (finishTime && finishTime !== lastPlayedFinishTime.value) {
       console.log('新的finishTime，播放提示音')
       lastPlayedFinishTime.value = finishTime
+      // 保存到localStorage
+      localStorage.setItem('lastPlayedFinishTime', finishTime.toString())
+      console.log('已保存finishTime到localStorage:', finishTime)
       playAllEndAlert()
     } else {
       console.log('相同的finishTime，跳过播放')
@@ -918,6 +950,39 @@ const addRows = (count) => {
     })
   }
   showMessage(`已添加 ${count} 行新数据`, 'success')
+}
+
+/**
+ * 清零当前已开金额
+ * @param {Object} item - 对冲配置项
+ */
+const cleanCurrentOpen = async (item) => {
+  if (!item.id) {
+    showMessage('请先保存数据后再清零', 'error')
+    return
+  }
+  
+  try {
+    const response = await fetch(`${API_BASE}/hedge/cleanCurrentOpen`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ id: item.id })
+    })
+    
+    if (!response.ok) {
+      throw new Error('清零请求失败')
+    }
+    
+    showMessage('清零成功', 'success')
+    
+    // 重新获取列表信息
+    await fetchHedgeList()
+  } catch (error) {
+    showMessage('清零失败: ' + error.message, 'error')
+    console.error('清零失败:', error)
+  }
 }
 
 /**
@@ -1297,6 +1362,61 @@ main {
   opacity: 0.6;
 }
 
+/* 当前已开列样式 - 包含输入框和清零按钮 */
+.hedge-table td.col-current-amt {
+  padding: 0.75rem 0.5rem;
+  position: relative;
+  min-height: 80px;
+}
+
+.current-amt-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.current-amt-container input {
+  min-width: 90px;
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+}
+
+.current-amt-container .btn-clean {
+  position: absolute;
+  top: calc(50% + 22px);
+  left: 0;
+  right: 0;
+}
+
+.btn-clean {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+  background-color: #dc3545;
+  color: white;
+  white-space: nowrap;
+}
+
+.btn-clean:hover:not(:disabled) {
+  background-color: #c82333;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(220, 53, 69, 0.3);
+}
+
+.btn-clean:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 /* 模式列样式 - 设置最小宽度 */
 .hedge-table td.col-mode {
   min-width: 100px;
@@ -1315,6 +1435,40 @@ main {
 
 .hedge-table tbody tr:hover {
   background-color: #f8f9fa;
+}
+
+/* 总计行样式 */
+.hedge-table tbody .total-row {
+  background-color: #e3f2fd;
+  font-weight: 600;
+  border-top: 2px solid #2196f3;
+  border-bottom: 3px solid #2196f3;
+  position: sticky;
+  top: 52px;
+  z-index: 98;
+}
+
+.hedge-table tbody .total-row:hover {
+  background-color: #e3f2fd !important;
+}
+
+.hedge-table tbody .total-row td {
+  padding: 0.75rem 0.5rem;
+}
+
+.hedge-table tbody .total-row .total-label {
+  text-align: center;
+  color: #1976d2;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.hedge-table tbody .total-row .total-value {
+  text-align: center;
+  color: #0d47a1;
+  font-size: 1rem;
+  font-weight: 700;
+  background-color: #bbdefb;
 }
 
 .hedge-table input {
