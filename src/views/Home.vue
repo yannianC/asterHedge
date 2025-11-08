@@ -19,6 +19,16 @@
             <input type="checkbox" v-model="allEndAlertEnabled" @change="saveAlertSettings" />
             <span class="switch-text">全部完成提醒</span>
           </label>
+          <div class="filter-container">
+            <label class="filter-label">筛选ID:</label>
+            <input 
+              type="text" 
+              v-model="filterInput" 
+              placeholder="如: 1 或 1,2 或 1-4"
+              class="filter-input"
+              @input="saveFilterInput"
+            />
+          </div>
           <!-- <button @click="viewAllLogs" class="btn-all-log">查看所有日志</button> -->
         </div>
 
@@ -54,15 +64,15 @@
           </thead>
           <tbody>
             <!-- 总计行 -->
-            <tr v-if="hedgeList.length > 0" class="total-row">
+            <tr v-if="filteredHedgeList.length > 0" class="total-row">
               <td class="col-id total-label">总计</td>
               <td class="col-status"></td>
               <td class="col-narrow"></td>
               <td class="col-narrow"></td>
-              <td class="col-current-amt total-value">{{ totalCurrentAmt.toFixed(2) }}</td>
+              <td class="col-current-amt total-value">{{ filteredTotalCurrentAmt.toFixed(2) }}</td>
               <td colspan="19"></td>
             </tr>
-            <tr v-for="(item, index) in hedgeList" :key="item.id || `new-${index}`">
+            <tr v-for="(item, index) in filteredHedgeList" :key="item.id || `new-${index}`">
               <td class="col-id">
                 <input type="text" v-model="item.id" disabled class="input-id" />
               </td>
@@ -108,6 +118,7 @@
                   <option :value="null">请选择</option>
                   <option :value="1">1-开仓</option>
                   <option :value="2">2-只平</option>
+                  <option :value="3">3-完全平仓</option>
                 </select>
               </td>
               <td class="col-narrow">
@@ -228,6 +239,9 @@
         <div v-if="hedgeList.length === 0" class="empty-state">
           暂无数据，点击上方按钮新增对冲数据
         </div>
+        <div v-else-if="filteredHedgeList.length === 0" class="empty-state">
+          没有符合筛选条件的数据
+        </div>
       </div>
 
       <div v-if="message" :class="['message', messageType]">
@@ -248,7 +262,56 @@ const messageType = ref('success')
 let ws = null
 
 /**
- * 计算"当前已开"的总和
+ * 解析筛选输入，返回符合条件的ID数组
+ * @param {String} input - 筛选输入（如：1 或 1,2 或 1-4）
+ * @returns {Array} ID数组
+ */
+const parseFilterInput = (input) => {
+  if (!input || !input.trim()) {
+    return []
+  }
+  
+  const ids = new Set()
+  const parts = input.split(',').map(p => p.trim()).filter(p => p)
+  
+  parts.forEach(part => {
+    if (part.includes('-')) {
+      // 处理范围：如 1-4
+      const [start, end] = part.split('-').map(s => parseInt(s.trim()))
+      if (!isNaN(start) && !isNaN(end) && start <= end) {
+        for (let i = start; i <= end; i++) {
+          ids.add(i)
+        }
+      }
+    } else {
+      // 处理单个数字
+      const num = parseInt(part)
+      if (!isNaN(num)) {
+        ids.add(num)
+      }
+    }
+  })
+  
+  return Array.from(ids)
+}
+
+/**
+ * 过滤后的对冲列表
+ */
+const filteredHedgeList = computed(() => {
+  const filterIds = parseFilterInput(filterInput.value)
+  
+  if (filterIds.length === 0) {
+    return hedgeList.value
+  }
+  
+  return hedgeList.value.filter(item => {
+    return item.id && filterIds.includes(parseInt(item.id))
+  })
+})
+
+/**
+ * 计算"当前已开"的总和（所有数据）
  */
 const totalCurrentAmt = computed(() => {
   return hedgeList.value.reduce((sum, item) => {
@@ -257,9 +320,22 @@ const totalCurrentAmt = computed(() => {
   }, 0)
 })
 
+/**
+ * 计算"当前已开"的总和（筛选后的数据）
+ */
+const filteredTotalCurrentAmt = computed(() => {
+  return filteredHedgeList.value.reduce((sum, item) => {
+    const amt = parseFloat(item.currentAmt) || 0
+    return sum + amt
+  }, 0)
+})
+
 // 音频提醒开关状态
 const smallEndAlertEnabled = ref(false)
 const allEndAlertEnabled = ref(false)
+
+// 筛选条件
+const filterInput = ref('')
 
 // 音频播放相关
 let smallEndAudio = null
@@ -742,6 +818,23 @@ const loadAlertSettings = () => {
 }
 
 /**
+ * 保存筛选条件到localStorage
+ */
+const saveFilterInput = () => {
+  localStorage.setItem('hedgeFilterInput', filterInput.value)
+}
+
+/**
+ * 从localStorage加载筛选条件
+ */
+const loadFilterInput = () => {
+  const savedFilter = localStorage.getItem('hedgeFilterInput')
+  if (savedFilter) {
+    filterInput.value = savedFilter
+  }
+}
+
+/**
  * 处理WebSocket推送的消息
  * @param {Object} wsData - WebSocket消息数据
  */
@@ -1058,6 +1151,7 @@ onMounted(() => {
   fetchHedgeList()
   connectWebSocket()
   loadAlertSettings() // 加载提醒设置
+  loadFilterInput() // 加载筛选条件
   
   // 添加全局点击监听器用于激活音频上下文
   document.addEventListener('click', handleGlobalClick)
@@ -1204,6 +1298,48 @@ main {
   font-weight: 500;
   color: #495057;
   white-space: nowrap;
+}
+
+/* 筛选功能样式 */
+.filter-container {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  transition: all 0.3s;
+}
+
+.filter-container:hover {
+  background-color: #e9ecef;
+}
+
+.filter-label {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #495057;
+  white-space: nowrap;
+}
+
+.filter-input {
+  width: 180px;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  transition: all 0.3s;
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.filter-input::placeholder {
+  color: #adb5bd;
+  font-size: 0.85rem;
 }
 
 .btn-all-log {
