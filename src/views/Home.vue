@@ -4,7 +4,7 @@
         <!-- WebSocket断开提示 -->
         <div v-if="wsDisconnected" class="ws-disconnect-alert">
           <span class="alert-icon">⚠️</span>
-          <span class="alert-text">WebSocket连接已断开超过3分钟（断开时间: {{ wsDisconnectTime }}），正在尝试重连...</span>
+          <span class="alert-text">WebSocket连接已断开（断开时间: {{ wsDisconnectTime }}），请刷新页面重新连接</span>
         </div>
         
         <div class="action-buttons">
@@ -28,6 +28,21 @@
               class="filter-input"
               @input="saveFilterInput"
             />
+          </div>
+          <div class="auto-refresh-container">
+            <label class="auto-refresh-label">
+              <input type="checkbox" v-model="autoRefreshEnabled" @change="toggleAutoRefresh" />
+              <span class="auto-refresh-text">自动更新</span>
+            </label>
+            <input 
+              type="number" 
+              v-model.number="autoRefreshInterval" 
+              placeholder="60"
+              min="5"
+              class="auto-refresh-input"
+              @change="saveAutoRefreshSettings"
+            />
+            <span class="auto-refresh-unit">秒</span>
           </div>
           <!-- <button @click="viewAllLogs" class="btn-all-log">查看所有日志</button> -->
         </div>
@@ -72,7 +87,7 @@
               <td class="col-current-amt total-value">{{ filteredTotalCurrentAmt.toFixed(2) }}</td>
               <td colspan="19"></td>
             </tr>
-            <tr v-for="(item, index) in filteredHedgeList" :key="item.id || `new-${index}`">
+            <tr v-for="(item, index) in filteredHedgeList" :key="item.id || `new-${index}`" :class="{ 'row-running': item.status === 0 }">
               <td class="col-id">
                 <input type="text" v-model="item.id" disabled class="input-id" />
               </td>
@@ -247,12 +262,82 @@
       <div v-if="message" :class="['message', messageType]">
         {{ message }}
       </div>
+
+      <!-- 自动化操作流程表 -->
+      <div class="automation-section">
+        <h2 class="section-title">自动化操作流程</h2>
+        
+        <div class="automation-buttons">
+          <button @click="addAutomationRows(1)" class="btn-add-auto">添加1行</button>
+          <button @click="addAutomationRows(5)" class="btn-add-auto">添加5行</button>
+          <button @click="addAutomationRows(10)" class="btn-add-auto">添加10行</button>
+        </div>
+
+        <div class="automation-table-container">
+          <table class="automation-table">
+            <thead>
+              <tr>
+                <th class="col-checkbox">勾选</th>
+                <th class="col-auto-input">等多久后操作(分钟)</th>
+                <th class="col-auto-input">ID</th>
+                <th class="col-auto-input">开启后多久关闭(分钟)</th>
+                <th class="col-auto-input">关闭后多久执行下一个(分钟)</th>
+                <th class="col-auto-input">平仓的ID</th>
+                <th class="col-auto-status">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(item, index) in automationList" :key="index">
+                <td class="col-checkbox">
+                  <input type="checkbox" v-model="item.checked" :disabled="item.running" />
+                </td>
+                <td>
+                  <input type="number" v-model.number="item.waitMinutes" placeholder="等待分钟" min="0" :disabled="item.running" />
+                </td>
+                <td>
+                  <input type="number" v-model.number="item.hedgeId" placeholder="ID" min="1" :disabled="item.running" />
+                </td>
+                <td>
+                  <input type="number" v-model.number="item.openDuration" placeholder="开启时长" min="0" :disabled="item.running" />
+                </td>
+                <td>
+                  <input type="number" v-model.number="item.waitAfterClose" placeholder="等待分钟" min="0" :disabled="item.running" />
+                </td>
+                <td>
+                  <input type="number" v-model.number="item.closeHedgeId" placeholder="平仓ID" min="1" :disabled="item.running" />
+                </td>
+                <td class="col-auto-status">
+                  <span :class="['status-badge', item.statusClass]">{{ item.statusText }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="automationList.length === 0" class="empty-state">
+            暂无数据，点击上方按钮添加自动化流程
+          </div>
+        </div>
+
+          <div class="automation-action-buttons">
+            <button @click="runAutomation" class="btn-run-auto">运行</button>
+            <button @click="exportAutomation" class="btn-export-auto">导出</button>
+            <div class="import-group">
+              <input 
+                type="text" 
+                v-model="importText" 
+                placeholder="粘贴导入的配置字符串"
+                class="import-input"
+              />
+              <button @click="importAutomation" class="btn-import-auto">导入</button>
+            </div>
+            <button @click="deleteAutomation" class="btn-delete-auto">删除</button>
+          </div>
+      </div>
     </main>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 
 const API_BASE = 'https://sg.bicoin.com.cn/99k/v2'
 const WS_BASE = 'wss://sg.bicoin.com.cn/99k/v2'
@@ -260,6 +345,7 @@ const hedgeList = ref([])
 const message = ref('')
 const messageType = ref('success')
 let ws = null
+let heartbeatTimer = null // 心跳检测定时器
 
 /**
  * 解析筛选输入，返回符合条件的ID数组
@@ -337,12 +423,21 @@ const allEndAlertEnabled = ref(false)
 // 筛选条件
 const filterInput = ref('')
 
+// 自动刷新设置
+const autoRefreshEnabled = ref(false)
+const autoRefreshInterval = ref(60) // 默认60秒
+let autoRefreshTimer = null
+
+// 自动化操作流程
+const automationList = ref([])
+const runningAutomations = new Map() // 存储运行中的自动化任务
+const importText = ref('') // 导入文本框
+
 // 音频播放相关
 let smallEndAudio = null
 let allEndAudio = null
 let smallEndTimer = null
 let allEndTimer = null
-let wsDisconnectAudio = null
 let wsDisconnectTimer = null
 
 // WebSocket断开提示
@@ -425,6 +520,42 @@ const fetchHedgeList = async () => {
 }
 
 /**
+ * 启动心跳检测
+ */
+const startHeartbeat = () => {
+  stopHeartbeat() // 先停止之前的定时器
+  heartbeatTimer = setTimeout(() => {
+    console.warn('20秒内未收到WebSocket消息，判定为连接断开')
+    // 显示断开提示
+    wsDisconnected.value = true
+    wsDisconnectTime.value = new Date().toLocaleString()
+    showMessage('WebSocket连接已断开，请刷新页面重新连接', 'error')
+    
+    // 关闭当前连接
+    if (ws) {
+      ws.close()
+    }
+  }, 30000) // 20秒
+}
+
+/**
+ * 重置心跳检测定时器
+ */
+const resetHeartbeat = () => {
+  startHeartbeat()
+}
+
+/**
+ * 停止心跳检测
+ */
+const stopHeartbeat = () => {
+  if (heartbeatTimer) {
+    clearTimeout(heartbeatTimer)
+    heartbeatTimer = null
+  }
+}
+
+/**
  * 建立WebSocket连接
  */
 const connectWebSocket = () => {
@@ -435,7 +566,7 @@ const connectWebSocket = () => {
     ws = new WebSocket(wsUrl)
     
     ws.onopen = () => {
-      console.log('WebSocket连接已建立，停止所有断开提醒')
+      console.log('WebSocket连接已建立')
       
       // 连接成功，清除断开定时器和提示
       if (wsDisconnectTimer) {
@@ -447,20 +578,15 @@ const connectWebSocket = () => {
       wsDisconnected.value = false
       wsDisconnectTime.value = null
       
-      // 停止断开提醒音
-      if (wsDisconnectAudio) {
-        console.log('停止WebSocket断开提醒音')
-        try {
-          wsDisconnectAudio.stop()
-        } catch (error) {
-          console.error('停止WebSocket断开音频失败:', error)
-        }
-        wsDisconnectAudio = null
-      }
+      // 启动心跳检测
+      startHeartbeat()
     }
     
     ws.onmessage = (event) => {
       try {
+        // 收到消息，重置心跳检测
+        resetHeartbeat()
+        
         const wsData = JSON.parse(event.data)
         handleWebSocketMessage(wsData)
       } catch (error) {
@@ -475,17 +601,19 @@ const connectWebSocket = () => {
     ws.onclose = () => {
       console.log('WebSocket连接已关闭')
       
-      // 设置3分钟定时器
+      // 停止心跳检测
+      stopHeartbeat()
+      
+      // 清除3分钟定时器（如果有）
       if (wsDisconnectTimer) {
         clearTimeout(wsDisconnectTimer)
+        wsDisconnectTimer = null
       }
-      wsDisconnectTimer = setTimeout(() => {
-        handleWsDisconnectTimeout()
-      }, 180000) // 3分钟 = 180000毫秒
       
       // 3秒后尝试重连
       setTimeout(() => {
         if (ws && ws.readyState === WebSocket.CLOSED) {
+          console.log('尝试重新连接WebSocket')
           connectWebSocket()
         }
       }, 3000)
@@ -640,7 +768,7 @@ const createMelodyAlertSound = (duration, melody) => {
   return { play, stop }
 }
 
-// 定义三种不同的旋律
+// 定义两种不同的旋律
 // 旋律1: 单次完成提醒(SINGLE_FINISH) - 轻快的双音提示
 const smallEndMelody = [
   { freq: 800, duration: 200 },
@@ -654,13 +782,6 @@ const allEndMelody = [
   { freq: 800, duration: 150 },
   { freq: 1000, duration: 150 },
   { freq: 0, duration: 350 }  // 静音间隔
-]
-
-// 旋律3: WebSocket断开提醒 - 紧急的双音下降
-const wsDisconnectMelody = [
-  { freq: 900, duration: 300 },
-  { freq: 700, duration: 300 },
-  { freq: 0, duration: 200 }  // 静音间隔
 ]
 
 /**
@@ -712,39 +833,6 @@ const playAllEndAlert = () => {
   console.log('播放全部完成提醒音（5分钟）- 三连音上升')
   allEndAudio = createMelodyAlertSound(300000, allEndMelody)
   allEndAudio.play()
-}
-
-/**
- * 播放WebSocket断开提醒音（2分钟）- 紧急双音下降
- */
-const playWsDisconnectAlert = () => {
-  // 停止之前的播放
-  if (wsDisconnectAudio) {
-    console.log('停止之前的WebSocket断开提醒音')
-    try {
-      wsDisconnectAudio.stop()
-    } catch (error) {
-      console.error('停止之前的音频失败:', error)
-    }
-    wsDisconnectAudio = null
-  }
-  
-  console.log('播放WebSocket断开提醒音（2分钟）- 紧急双音下降')
-  wsDisconnectAudio = createMelodyAlertSound(120000, wsDisconnectMelody)
-  wsDisconnectAudio.play()
-  
-  // 显示断开提示
-  wsDisconnected.value = true
-  wsDisconnectTime.value = new Date().toLocaleString()
-}
-
-/**
- * 处理WebSocket断开超过3分钟
- */
-const handleWsDisconnectTimeout = () => {
-  console.warn('WebSocket断开超过3分钟未重连')
-  playWsDisconnectAlert()
-  showMessage('WebSocket连接已断开超过3分钟，请检查网络连接', 'error')
 }
 
 /**
@@ -835,6 +923,85 @@ const loadFilterInput = () => {
 }
 
 /**
+ * 启动自动刷新定时器
+ */
+const startAutoRefresh = () => {
+  // 清除已有的定时器
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+  
+  if (autoRefreshEnabled.value && autoRefreshInterval.value > 0) {
+    console.log(`启动自动刷新，间隔: ${autoRefreshInterval.value}秒`)
+    autoRefreshTimer = setInterval(() => {
+      console.log('自动刷新列表数据')
+      fetchHedgeList()
+    }, autoRefreshInterval.value * 1000)
+  }
+}
+
+/**
+ * 停止自动刷新定时器
+ */
+const stopAutoRefresh = () => {
+  if (autoRefreshTimer) {
+    console.log('停止自动刷新')
+    clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+}
+
+/**
+ * 切换自动刷新状态
+ */
+const toggleAutoRefresh = () => {
+  if (autoRefreshEnabled.value) {
+    startAutoRefresh()
+  } else {
+    stopAutoRefresh()
+  }
+  saveAutoRefreshSettings()
+}
+
+/**
+ * 保存自动刷新设置到localStorage
+ */
+const saveAutoRefreshSettings = () => {
+  localStorage.setItem('autoRefreshEnabled', autoRefreshEnabled.value ? '1' : '0')
+  localStorage.setItem('autoRefreshInterval', autoRefreshInterval.value.toString())
+  
+  // 如果已启用，重新启动定时器（间隔时间可能变化了）
+  if (autoRefreshEnabled.value) {
+    startAutoRefresh()
+  }
+}
+
+/**
+ * 从localStorage加载自动刷新设置
+ */
+const loadAutoRefreshSettings = () => {
+  const enabled = localStorage.getItem('autoRefreshEnabled')
+  const interval = localStorage.getItem('autoRefreshInterval')
+  
+  if (enabled === '1') {
+    autoRefreshEnabled.value = true
+  }
+  
+  if (interval) {
+    const intervalNum = parseInt(interval)
+    if (!isNaN(intervalNum) && intervalNum > 0) {
+      autoRefreshInterval.value = intervalNum
+    }
+  }
+  
+  // 如果启用了自动刷新，启动定时器
+  if (autoRefreshEnabled.value) {
+    startAutoRefresh()
+  }
+}
+
+/**
  * 处理WebSocket推送的消息
  * @param {Object} wsData - WebSocket消息数据
  */
@@ -886,6 +1053,7 @@ const handleWebSocketMessage = (wsData) => {
  * 关闭WebSocket连接
  */
 const closeWebSocket = () => {
+  stopHeartbeat() // 停止心跳检测
   if (ws) {
     ws.close()
     ws = null
@@ -1146,12 +1314,410 @@ const handleGlobalClick = () => {
   }
 }
 
+/**
+ * 保存自动化流程数据到localStorage
+ */
+const saveAutomationToLocal = () => {
+  try {
+    // 保存时排除运行状态相关的字段
+    const dataToSave = automationList.value.map(item => ({
+      checked: false, // 重置勾选状态
+      waitMinutes: item.waitMinutes,
+      hedgeId: item.hedgeId,
+      openDuration: item.openDuration,
+      waitAfterClose: item.waitAfterClose,
+      closeHedgeId: item.closeHedgeId,
+      running: false, // 重置运行状态
+      statusText: '未启动',
+      statusClass: 'status-waiting'
+    }))
+    localStorage.setItem('automationFlowList', JSON.stringify(dataToSave))
+    console.log('自动化流程数据已保存到本地')
+  } catch (error) {
+    console.error('保存自动化流程数据失败:', error)
+  }
+}
+
+/**
+ * 从localStorage加载自动化流程数据
+ */
+const loadAutomationFromLocal = () => {
+  try {
+    const savedData = localStorage.getItem('automationFlowList')
+    if (savedData) {
+      const parsedData = JSON.parse(savedData)
+      automationList.value = parsedData
+      console.log('已加载自动化流程数据:', parsedData.length, '行')
+    }
+  } catch (error) {
+    console.error('加载自动化流程数据失败:', error)
+  }
+}
+
+/**
+ * 添加自动化流程行
+ * @param {Number} count - 添加的行数
+ */
+const addAutomationRows = (count) => {
+  for (let i = 0; i < count; i++) {
+    automationList.value.push({
+      checked: false,
+      waitMinutes: null,
+      hedgeId: null,
+      openDuration: null,
+      waitAfterClose: null,
+      closeHedgeId: null,
+      running: false,
+      statusText: '未启动',
+      statusClass: 'status-waiting'
+    })
+  }
+  saveAutomationToLocal() // 保存到本地
+  showMessage(`已添加 ${count} 行自动化流程`, 'success')
+}
+
+/**
+ * 删除选中的自动化流程
+ */
+const deleteAutomation = () => {
+  const checkedItems = automationList.value.filter(item => item.checked && !item.running)
+  
+  if (checkedItems.length === 0) {
+    showMessage('请勾选要删除的行（运行中的不能删除）', 'error')
+    return
+  }
+  
+  automationList.value = automationList.value.filter(item => !item.checked || item.running)
+  saveAutomationToLocal() // 保存到本地
+  showMessage(`已删除 ${checkedItems.length} 行`, 'success')
+}
+
+/**
+ * 导出选中的自动化流程
+ */
+const exportAutomation = async () => {
+  const checkedItems = automationList.value.filter(item => item.checked && !item.running)
+  
+  if (checkedItems.length === 0) {
+    showMessage('请勾选要导出的流程', 'error')
+    return
+  }
+  
+  try {
+    // 提取需要导出的配置数据
+    const exportData = checkedItems.map(item => ({
+      w: item.waitMinutes,        // 等待时间
+      i: item.hedgeId,            // ID
+      d: item.openDuration,       // 持续时间
+      a: item.waitAfterClose,     // 后续等待
+      c: item.closeHedgeId        // 平仓ID
+    }))
+    
+    // 直接使用JSON字符串（简化键名以缩短长度）
+    const jsonStr = JSON.stringify(exportData)
+    
+    // 复制到剪贴板
+    await navigator.clipboard.writeText(jsonStr)
+    
+    showMessage(`已导出 ${checkedItems.length} 个流程配置到剪贴板`, 'success')
+  } catch (error) {
+    console.error('导出失败:', error)
+    showMessage('导出失败，请检查浏览器权限', 'error')
+  }
+}
+
+/**
+ * 导入自动化流程
+ */
+const importAutomation = () => {
+  if (!importText.value || !importText.value.trim()) {
+    showMessage('请输入要导入的配置字符串', 'error')
+    return
+  }
+  
+  try {
+    // 直接解析JSON字符串
+    const importData = JSON.parse(importText.value.trim())
+    
+    if (!Array.isArray(importData) || importData.length === 0) {
+      showMessage('导入的数据格式不正确', 'error')
+      return
+    }
+    
+    // 验证数据格式（支持简化键名）
+    for (const item of importData) {
+      if (!item.i || !item.d || item.w === null || 
+          item.w === undefined || item.a === null || 
+          item.a === undefined || !item.c) {
+        showMessage('导入的数据格式不完整', 'error')
+        return
+      }
+    }
+    
+    // 添加到列表中
+    importData.forEach(item => {
+      automationList.value.push({
+        checked: false,
+        waitMinutes: item.w,
+        hedgeId: item.i,
+        openDuration: item.d,
+        waitAfterClose: item.a,
+        closeHedgeId: item.c,
+        running: false,
+        statusText: '未启动',
+        statusClass: 'status-waiting'
+      })
+    })
+    
+    saveAutomationToLocal() // 保存到本地
+    importText.value = '' // 清空输入框
+    showMessage(`成功导入 ${importData.length} 个流程配置`, 'success')
+  } catch (error) {
+    console.error('导入失败:', error)
+    showMessage('导入失败，配置字符串格式不正确', 'error')
+  }
+}
+
+/**
+ * 运行自动化流程
+ */
+const runAutomation = async () => {
+  const checkedItems = automationList.value.filter(item => item.checked && !item.running)
+  
+  if (checkedItems.length === 0) {
+    showMessage('请勾选要运行的流程', 'error')
+    return
+  }
+  
+  // 验证输入
+  for (const item of checkedItems) {
+    if (!item.hedgeId || !item.openDuration || item.waitMinutes === null || 
+        item.waitAfterClose === null || !item.closeHedgeId) {
+      showMessage('请完整填写所有必填字段', 'error')
+      return
+    }
+  }
+  
+  showMessage(`开始运行 ${checkedItems.length} 个自动化流程`, 'success')
+  
+  // 为每个勾选的项目启动自动化流程
+  for (const item of checkedItems) {
+    runSingleAutomation(item)
+  }
+}
+
+/**
+ * 运行单个自动化流程
+ * @param {Object} item - 自动化流程项
+ */
+const runSingleAutomation = async (item) => {
+  item.running = true
+  item.statusClass = 'status-waiting'
+  
+  const automationId = Date.now() + Math.random()
+  
+  try {
+    // 步骤1：等待指定时间
+    const startWaitTime = Date.now()
+    const waitDuration = item.waitMinutes * 60 * 1000
+    
+    // 显示等待倒计时
+    const waitCountdown = setInterval(() => {
+      if (!item.running) {
+        clearInterval(waitCountdown)
+        return
+      }
+      const elapsed = Date.now() - startWaitTime
+      const remaining = Math.max(0, Math.ceil((waitDuration - elapsed) / 60000))
+      item.statusText = `[步骤1/5] 初始等待中，剩余 ${remaining} 分钟`
+    }, 1000)
+    
+    await sleep(waitDuration)
+    clearInterval(waitCountdown)
+    
+    if (!item.running) return // 如果已取消，退出
+    
+    // 步骤2：开启对应ID的运行状态
+    item.statusText = `[步骤2/5] 正在开启 ID ${item.hedgeId} 的运行状态...`
+    item.statusClass = 'status-running'
+    
+    const success = await changeHedgeStatus(item.hedgeId, 0) // 0表示运行中
+    if (!success) {
+      item.statusText = '[失败] 开启ID失败'
+      item.statusClass = 'status-error'
+      item.running = false
+      return
+    }
+    
+    item.statusText = `[步骤2/5] ID ${item.hedgeId} 已开启运行`
+    await sleep(2000) // 显示2秒
+    
+    // 步骤3：监控运行状态
+    const startTime = Date.now()
+    const maxDuration = item.openDuration * 60 * 1000
+    
+    item.statusText = `[步骤3/5] 监控 ID ${item.hedgeId} 运行状态...`
+    item.statusClass = 'status-monitoring'
+    
+    const monitorInterval = setInterval(async () => {
+      if (!item.running) {
+        clearInterval(monitorInterval)
+        return
+      }
+      
+      const elapsed = Date.now() - startTime
+      const remainingMinutes = Math.ceil((maxDuration - elapsed) / 60000)
+      const elapsedMinutes = Math.floor(elapsed / 60000)
+      item.statusText = `[步骤3/5] 监控中 ID ${item.hedgeId}，已运行 ${elapsedMinutes} 分钟，剩余 ${remainingMinutes} 分钟`
+      
+      // 检查是否超时且仍在运行
+      if (elapsed >= maxDuration) {
+        const hedgeItem = hedgeList.value.find(h => h.id === item.hedgeId)
+        if (hedgeItem && hedgeItem.status === 0) {
+          // 仍在运行，需要关闭
+          item.statusText = `[步骤3/5] 时间到，正在关闭 ID ${item.hedgeId}...`
+          await changeHedgeStatus(item.hedgeId, 1) // 1表示暂停
+          item.statusText = `[步骤3/5] ID ${item.hedgeId} 已关闭`
+          await sleep(2000) // 显示2秒
+        } else {
+          item.statusText = `[步骤3/5] ID ${item.hedgeId} 已自动关闭`
+          await sleep(2000) // 显示2秒
+        }
+        
+        clearInterval(monitorInterval)
+        
+        // 步骤4：等待关闭后的时间
+        item.statusClass = 'status-waiting'
+        const waitAfterStartTime = Date.now()
+        const waitAfterDuration = item.waitAfterClose * 60 * 1000
+        
+        // 显示等待倒计时
+        const waitAfterCountdown = setInterval(() => {
+          if (!item.running) {
+            clearInterval(waitAfterCountdown)
+            return
+          }
+          const elapsed = Date.now() - waitAfterStartTime
+          const remaining = Math.max(0, Math.ceil((waitAfterDuration - elapsed) / 60000))
+          item.statusText = `[步骤4/5] 等待执行平仓，剩余 ${remaining} 分钟`
+        }, 1000)
+        
+        await sleep(waitAfterDuration)
+        clearInterval(waitAfterCountdown)
+        
+        if (!item.running) return
+        
+        // 步骤5：开启平仓ID
+        item.statusText = `[步骤5/5] 正在开启平仓 ID ${item.closeHedgeId}...`
+        item.statusClass = 'status-running'
+        
+        const closeSuccess = await changeHedgeStatus(item.closeHedgeId, 0)
+        if (!closeSuccess) {
+          item.statusText = '[失败] 开启平仓ID失败'
+          item.statusClass = 'status-error'
+          item.running = false
+          return
+        }
+        
+        item.statusText = `[步骤5/5] 平仓 ID ${item.closeHedgeId} 已开启`
+        await sleep(2000) // 显示2秒
+        
+        item.statusText = `✓ 流程完成: ${item.hedgeId} → ${item.closeHedgeId}`
+        item.statusClass = 'status-completed'
+        item.running = false
+        item.checked = false
+        
+        showMessage(`自动化流程完成：ID ${item.hedgeId} → ${item.closeHedgeId}`, 'success')
+      }
+    }, 10000) // 每10秒检测一次
+    
+    runningAutomations.set(automationId, monitorInterval)
+    
+  } catch (error) {
+    console.error('自动化流程执行失败:', error)
+    item.statusText = `✗ 执行失败: ${error.message}`
+    item.statusClass = 'status-error'
+    item.running = false
+    showMessage(`自动化流程执行失败: ${error.message}`, 'error')
+  }
+}
+
+/**
+ * 修改对冲配置的运行状态
+ * @param {Number} hedgeId - 对冲配置ID
+ * @param {Number} status - 状态 (0-运行中, 1-暂停)
+ * @returns {Boolean} 是否成功
+ */
+const changeHedgeStatus = async (hedgeId, status) => {
+  try {
+    const response = await fetch(`${API_BASE}/hedge/changeStatus`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        id: hedgeId,
+        status: status
+      })
+    })
+    
+    const result = await response.json()
+    if (result.code === 0 || result.success) {
+      // 更新本地状态
+      const hedgeItem = hedgeList.value.find(h => h.id === hedgeId)
+      if (hedgeItem) {
+        hedgeItem.status = status
+      }
+      return true
+    } else {
+      console.error('状态修改失败:', result.message)
+      return false
+    }
+  } catch (error) {
+    console.error('状态修改请求失败:', error)
+    return false
+  }
+}
+
+/**
+ * 睡眠函数
+ * @param {Number} ms - 毫秒数
+ * @returns {Promise}
+ */
+const sleep = (ms) => {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// 监听自动化流程数据变化并保存（防抖处理，避免频繁保存）
+let saveTimeout = null
+watch(
+  () => automationList.value.map(item => ({
+    waitMinutes: item.waitMinutes,
+    hedgeId: item.hedgeId,
+    openDuration: item.openDuration,
+    waitAfterClose: item.waitAfterClose,
+    closeHedgeId: item.closeHedgeId
+  })),
+  () => {
+    // 防抖：500ms内如果有新的变化就重置定时器
+    if (saveTimeout) {
+      clearTimeout(saveTimeout)
+    }
+    saveTimeout = setTimeout(() => {
+      saveAutomationToLocal()
+    }, 500)
+  },
+  { deep: true }
+)
+
 // 组件挂载时加载数据并建立WebSocket连接
 onMounted(() => {
   fetchHedgeList()
   connectWebSocket()
   loadAlertSettings() // 加载提醒设置
   loadFilterInput() // 加载筛选条件
+  loadAutoRefreshSettings() // 加载自动刷新设置
+  loadAutomationFromLocal() // 加载自动化流程数据
   
   // 添加全局点击监听器用于激活音频上下文
   document.addEventListener('click', handleGlobalClick)
@@ -1164,15 +1730,23 @@ onUnmounted(() => {
   // 移除全局点击监听器
   document.removeEventListener('click', handleGlobalClick)
   
+  // 停止自动刷新定时器
+  stopAutoRefresh()
+  
+  // 停止心跳检测
+  stopHeartbeat()
+  
+  // 清理保存定时器
+  if (saveTimeout) {
+    clearTimeout(saveTimeout)
+  }
+  
   // 清理音频资源
   if (smallEndAudio) {
     smallEndAudio.stop()
   }
   if (allEndAudio) {
     allEndAudio.stop()
-  }
-  if (wsDisconnectAudio) {
-    wsDisconnectAudio.stop()
   }
   if (smallEndTimer) {
     clearTimeout(smallEndTimer)
@@ -1340,6 +1914,65 @@ main {
 .filter-input::placeholder {
   color: #adb5bd;
   font-size: 0.85rem;
+}
+
+/* 自动刷新功能样式 */
+.auto-refresh-container {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  transition: all 0.3s;
+}
+
+.auto-refresh-container:hover {
+  background-color: #e9ecef;
+}
+
+.auto-refresh-label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.auto-refresh-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #28a745;
+}
+
+.auto-refresh-text {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #495057;
+  white-space: nowrap;
+}
+
+.auto-refresh-input {
+  width: 80px;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  transition: all 0.3s;
+  text-align: center;
+}
+
+.auto-refresh-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.auto-refresh-unit {
+  font-size: 0.9rem;
+  color: #6c757d;
+  white-space: nowrap;
 }
 
 .btn-all-log {
@@ -1571,6 +2204,15 @@ main {
 
 .hedge-table tbody tr:hover {
   background-color: #f8f9fa;
+}
+
+/* 运行中状态的行背景 */
+.hedge-table tbody tr.row-running {
+  background-color: #d4edda;
+}
+
+.hedge-table tbody tr.row-running:hover {
+  background-color: #c3e6cb;
 }
 
 /* 总计行样式 */
@@ -1922,6 +2564,282 @@ main {
   to {
     opacity: 1;
   }
+}
+
+/* 自动化操作流程样式 */
+.automation-section {
+  max-width: 100%;
+  margin: 3rem auto 0;
+  padding: 2rem;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.section-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #495057;
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 3px solid #667eea;
+}
+
+.automation-buttons {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.btn-add-auto {
+  background-color: #667eea;
+  color: white;
+  border: none;
+  padding: 0.6rem 1.2rem;
+  font-size: 0.95rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+}
+
+.btn-add-auto:hover {
+  background-color: #5568d3;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.automation-table-container {
+  overflow-x: auto;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  max-height: 500px;
+  overflow-y: auto;
+  margin-bottom: 1.5rem;
+}
+
+.automation-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1100px;
+}
+
+.automation-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: #f8f9fa;
+}
+
+.automation-table th {
+  background-color: #f8f9fa;
+  color: #495057;
+  font-weight: 600;
+  padding: 1rem 0.75rem;
+  text-align: center;
+  border-bottom: 2px solid #dee2e6;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.automation-table th.col-checkbox {
+  width: 60px;
+}
+
+.automation-table th.col-auto-input {
+  width: 150px;
+}
+
+.automation-table th.col-auto-status {
+  width: 320px;
+  min-width: 320px;
+}
+
+.automation-table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #e9ecef;
+  text-align: center;
+}
+
+.automation-table td.col-auto-status {
+  text-align: left;
+}
+
+.automation-table tbody tr:hover {
+  background-color: #f8f9fa;
+}
+
+.automation-table input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  accent-color: #667eea;
+}
+
+.automation-table input[type="number"] {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  transition: border-color 0.3s;
+  text-align: center;
+}
+
+.automation-table input[type="number"]:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.automation-table input:disabled {
+  background-color: #f8f9fa;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.5rem 0.9rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: normal;
+  word-break: break-word;
+  max-width: 300px;
+  line-height: 1.5;
+}
+
+.status-waiting {
+  background-color: #ffc107;
+  color: #000;
+}
+
+.status-running {
+  background-color: #28a745;
+  color: white;
+}
+
+.status-monitoring {
+  background-color: #17a2b8;
+  color: white;
+}
+
+.status-completed {
+  background-color: #6c757d;
+  color: white;
+}
+
+.status-error {
+  background-color: #dc3545;
+  color: white;
+}
+
+.automation-action-buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-run-auto {
+  background-color: #28a745;
+  color: white;
+  border: none;
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+}
+
+.btn-run-auto:hover {
+  background-color: #218838;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+}
+
+.btn-export-auto {
+  background-color: #17a2b8;
+  color: white;
+  border: none;
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+}
+
+.btn-export-auto:hover {
+  background-color: #138496;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(23, 162, 184, 0.4);
+}
+
+.import-group {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.import-input {
+  width: 300px;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  transition: all 0.3s;
+}
+
+.import-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.import-input::placeholder {
+  color: #adb5bd;
+  font-size: 0.85rem;
+}
+
+.btn-import-auto {
+  background-color: #667eea;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+}
+
+.btn-import-auto:hover {
+  background-color: #5568d3;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.btn-delete-auto {
+  background-color: #dc3545;
+  color: white;
+  border: none;
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+}
+
+.btn-delete-auto:hover {
+  background-color: #c82333;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
 }
 </style>
 
