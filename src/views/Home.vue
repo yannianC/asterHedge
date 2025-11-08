@@ -278,11 +278,13 @@
             <thead>
               <tr>
                 <th class="col-checkbox">勾选</th>
+                <th class="col-sequence">序号</th>
                 <th class="col-auto-input">等多久后操作(分钟)</th>
                 <th class="col-auto-input">ID</th>
                 <th class="col-auto-input">开启后多久关闭(分钟)</th>
                 <th class="col-auto-input">关闭后多久执行下一个(分钟)</th>
                 <th class="col-auto-input">平仓的ID</th>
+                <th class="col-auto-input">结束后跳转序号</th>
                 <th class="col-auto-status">状态</th>
               </tr>
             </thead>
@@ -290,6 +292,9 @@
               <tr v-for="(item, index) in automationList" :key="index">
                 <td class="col-checkbox">
                   <input type="checkbox" v-model="item.checked" :disabled="item.running" />
+                </td>
+                <td class="col-sequence">
+                  <span class="sequence-number">{{ index + 1 }}</span>
                 </td>
                 <td>
                   <input type="number" v-model.number="item.waitMinutes" placeholder="等待分钟" min="0" :disabled="item.running" />
@@ -306,6 +311,9 @@
                 <td>
                   <input type="number" v-model.number="item.closeHedgeId" placeholder="平仓ID" min="1" :disabled="item.running" />
                 </td>
+                <td>
+                  <input type="number" v-model.number="item.jumpToSequence" placeholder="跳转序号" min="1" :disabled="item.running" />
+                </td>
                 <td class="col-auto-status">
                   <span :class="['status-badge', item.statusClass]">{{ item.statusText }}</span>
                 </td>
@@ -318,6 +326,7 @@
         </div>
 
           <div class="automation-action-buttons">
+            <button @click="toggleSelectAll" class="btn-select-all">{{ selectAllButtonText }}</button>
             <button @click="runAutomation" class="btn-run-auto">运行</button>
             <button @click="exportAutomation" class="btn-export-auto">导出</button>
             <div class="import-group">
@@ -1327,6 +1336,7 @@ const saveAutomationToLocal = () => {
       openDuration: item.openDuration,
       waitAfterClose: item.waitAfterClose,
       closeHedgeId: item.closeHedgeId,
+      jumpToSequence: item.jumpToSequence,
       running: false, // 重置运行状态
       statusText: '未启动',
       statusClass: 'status-waiting'
@@ -1367,6 +1377,7 @@ const addAutomationRows = (count) => {
       openDuration: null,
       waitAfterClose: null,
       closeHedgeId: null,
+      jumpToSequence: null,
       running: false,
       statusText: '未启动',
       statusClass: 'status-waiting'
@@ -1393,6 +1404,47 @@ const deleteAutomation = () => {
 }
 
 /**
+ * 全选按钮文本（根据当前状态动态显示）
+ */
+const selectAllButtonText = computed(() => {
+  // 筛选出可以操作的项（非运行中的项）
+  const operableItems = automationList.value.filter(item => !item.running)
+  
+  if (operableItems.length === 0) {
+    return '全选'
+  }
+  
+  // 检查是否所有可操作项都已勾选
+  const allChecked = operableItems.every(item => item.checked)
+  
+  return allChecked ? '全不选' : '全选'
+})
+
+/**
+ * 全选/全不选切换
+ */
+const toggleSelectAll = () => {
+  // 筛选出可以操作的项（非运行中的项）
+  const operableItems = automationList.value.filter(item => !item.running)
+  
+  if (operableItems.length === 0) {
+    showMessage('没有可操作的项', 'error')
+    return
+  }
+  
+  // 检查是否所有可操作项都已勾选
+  const allChecked = operableItems.every(item => item.checked)
+  
+  // 如果全部勾选则全不选，否则全选
+  operableItems.forEach(item => {
+    item.checked = !allChecked
+  })
+  
+  const action = allChecked ? '全不选' : '全选'
+  showMessage(`已${action} ${operableItems.length} 项`, 'success')
+}
+
+/**
  * 导出选中的自动化流程
  */
 const exportAutomation = async () => {
@@ -1404,14 +1456,20 @@ const exportAutomation = async () => {
   }
   
   try {
-    // 提取需要导出的配置数据
-    const exportData = checkedItems.map(item => ({
-      w: item.waitMinutes,        // 等待时间
-      i: item.hedgeId,            // ID
-      d: item.openDuration,       // 持续时间
-      a: item.waitAfterClose,     // 后续等待
-      c: item.closeHedgeId        // 平仓ID
-    }))
+    // 提取需要导出的配置数据，同时记录原始序号
+    const exportData = checkedItems.map((item, index) => {
+      // 找到该item在automationList中的原始位置
+      const originalIndex = automationList.value.indexOf(item)
+      return {
+        s: originalIndex + 1,       // 原始序号（用于导入时重新映射）
+        w: item.waitMinutes,        // 等待时间
+        i: item.hedgeId,            // ID
+        d: item.openDuration,       // 持续时间
+        a: item.waitAfterClose,     // 后续等待
+        c: item.closeHedgeId,       // 平仓ID
+        j: item.jumpToSequence      // 跳转序号
+      }
+    })
     
     // 直接使用JSON字符串（简化键名以缩短长度）
     const jsonStr = JSON.stringify(exportData)
@@ -1427,7 +1485,7 @@ const exportAutomation = async () => {
 }
 
 /**
- * 导入自动化流程
+ * 导入自动化流程（覆盖原有数据）
  */
 const importAutomation = () => {
   if (!importText.value || !importText.value.trim()) {
@@ -1445,33 +1503,59 @@ const importAutomation = () => {
     }
     
     // 验证数据格式（支持简化键名）
+    // w 和 a 可以为 null（表示不填写），但 i、d、c 必须有值
     for (const item of importData) {
-      if (!item.i || !item.d || item.w === null || 
-          item.w === undefined || item.a === null || 
-          item.a === undefined || !item.c) {
-        showMessage('导入的数据格式不完整', 'error')
+      if (!item.i || !item.d || !item.c) {
+        showMessage('导入的数据格式不完整（缺少必填字段：ID、开启时长或平仓ID）', 'error')
         return
       }
+      // w 和 a 可以为 null，不需要验证
     }
     
-    // 添加到列表中
-    importData.forEach(item => {
-      automationList.value.push({
+    // 建立序号映射：旧序号 → 新序号
+    const sequenceMap = new Map()
+    importData.forEach((item, index) => {
+      if (item.s) {
+        // 如果有原始序号，建立映射关系
+        sequenceMap.set(item.s, index + 1)
+      }
+    })
+    
+    // 清空原有数据并导入新数据（覆盖模式）
+    automationList.value = importData.map((item, index) => {
+      let newJumpToSequence = null
+      
+      // 如果有跳转序号且有序号映射，则重新映射
+      if (item.j && sequenceMap.size > 0) {
+        // 尝试从映射中找到新序号
+        newJumpToSequence = sequenceMap.get(item.j) || item.j
+        // 如果映射后的序号超出范围，设为null
+        if (newJumpToSequence > importData.length) {
+          console.warn(`跳转序号 ${item.j} 在导入的数据中不存在，已清除`)
+          newJumpToSequence = null
+        }
+      } else if (item.j) {
+        // 没有序号映射，直接使用原跳转序号
+        newJumpToSequence = item.j
+      }
+      
+      return {
         checked: false,
-        waitMinutes: item.w,
+        waitMinutes: item.w !== undefined ? item.w : null,
         hedgeId: item.i,
         openDuration: item.d,
-        waitAfterClose: item.a,
+        waitAfterClose: item.a !== undefined ? item.a : null,
         closeHedgeId: item.c,
+        jumpToSequence: newJumpToSequence,
         running: false,
         statusText: '未启动',
         statusClass: 'status-waiting'
-      })
+      }
     })
     
     saveAutomationToLocal() // 保存到本地
     importText.value = '' // 清空输入框
-    showMessage(`成功导入 ${importData.length} 个流程配置`, 'success')
+    showMessage(`成功导入 ${importData.length} 个流程配置（已覆盖原有数据）`, 'success')
   } catch (error) {
     console.error('导入失败:', error)
     showMessage('导入失败，配置字符串格式不正确', 'error')
@@ -1489,8 +1573,21 @@ const runAutomation = async () => {
     return
   }
   
+  // 过滤掉没有填写等待时间的项目（null、undefined、空字符串都算未填写）
+  const validItems = checkedItems.filter(item => {
+    return item.waitMinutes !== null && 
+           item.waitMinutes !== undefined && 
+           item.waitMinutes !== '' &&
+           !isNaN(item.waitMinutes)
+  })
+  
+  if (validItems.length === 0) {
+    showMessage('所有勾选的流程都没有填写"等多久后操作"，无法运行', 'error')
+    return
+  }
+  
   // 验证输入
-  for (const item of checkedItems) {
+  for (const item of validItems) {
     if (!item.hedgeId || !item.openDuration || item.waitMinutes === null || 
         item.waitAfterClose === null || !item.closeHedgeId) {
       showMessage('请完整填写所有必填字段', 'error')
@@ -1498,44 +1595,52 @@ const runAutomation = async () => {
     }
   }
   
-  showMessage(`开始运行 ${checkedItems.length} 个自动化流程`, 'success')
+  const skippedCount = checkedItems.length - validItems.length
+  if (skippedCount > 0) {
+    showMessage(`开始运行 ${validItems.length} 个自动化流程（跳过 ${skippedCount} 个未填写等待时间的）`, 'success')
+  } else {
+    showMessage(`开始运行 ${validItems.length} 个自动化流程`, 'success')
+  }
   
   // 为每个勾选的项目启动自动化流程
-  for (const item of checkedItems) {
-    runSingleAutomation(item)
+  for (const item of validItems) {
+    runSingleAutomation(item, false)
   }
 }
 
 /**
  * 运行单个自动化流程
  * @param {Object} item - 自动化流程项
+ * @param {Boolean} skipWait - 是否跳过第一步等待（用于跳转）
  */
-const runSingleAutomation = async (item) => {
+const runSingleAutomation = async (item, skipWait = false) => {
   item.running = true
   item.statusClass = 'status-waiting'
   
   const automationId = Date.now() + Math.random()
   
   try {
-    // 步骤1：等待指定时间
-    const startWaitTime = Date.now()
-    const waitDuration = item.waitMinutes * 60 * 1000
-    
-    // 显示等待倒计时
-    const waitCountdown = setInterval(() => {
-      if (!item.running) {
-        clearInterval(waitCountdown)
-        return
-      }
-      const elapsed = Date.now() - startWaitTime
-      const remaining = Math.max(0, Math.ceil((waitDuration - elapsed) / 60000))
-      item.statusText = `[步骤1/5] 初始等待中，剩余 ${remaining} 分钟`
-    }, 1000)
-    
-    await sleep(waitDuration)
-    clearInterval(waitCountdown)
-    
-    if (!item.running) return // 如果已取消，退出
+    // 步骤1：等待指定时间（如果skipWait为true则跳过）
+    if (!skipWait) {
+      const startWaitTime = Date.now()
+      const waitDuration = item.waitMinutes * 60 * 1000
+      
+      // 显示等待倒计时
+      const waitCountdown = setInterval(() => {
+        if (!item.running) {
+          clearInterval(waitCountdown)
+          return
+        }
+        const elapsed = Date.now() - startWaitTime
+        const remaining = Math.max(0, Math.ceil((waitDuration - elapsed) / 60000))
+        item.statusText = `[步骤1/5] 初始等待中，剩余 ${remaining} 分钟`
+      }, 1000)
+      
+      await sleep(waitDuration)
+      clearInterval(waitCountdown)
+      
+      if (!item.running) return // 如果已取消，退出
+    }
     
     // 步骤2：开启对应ID的运行状态
     item.statusText = `[步骤2/5] 正在开启 ID ${item.hedgeId} 的运行状态...`
@@ -1559,6 +1664,77 @@ const runSingleAutomation = async (item) => {
     item.statusText = `[步骤3/5] 监控 ID ${item.hedgeId} 运行状态...`
     item.statusClass = 'status-monitoring'
     
+    // 执行步骤4和步骤5的函数（提取出来避免重复代码）
+    const executeStep4And5 = async () => {
+      // 步骤4：等待关闭后的时间
+      item.statusClass = 'status-waiting'
+      const waitAfterStartTime = Date.now()
+      const waitAfterDuration = item.waitAfterClose * 60 * 1000
+      
+      // 显示等待倒计时
+      const waitAfterCountdown = setInterval(() => {
+        if (!item.running) {
+          clearInterval(waitAfterCountdown)
+          return
+        }
+        const elapsed = Date.now() - waitAfterStartTime
+        const remaining = Math.max(0, Math.ceil((waitAfterDuration - elapsed) / 60000))
+        item.statusText = `[步骤4/5] 等待执行平仓，剩余 ${remaining} 分钟`
+      }, 1000)
+      
+      await sleep(waitAfterDuration)
+      clearInterval(waitAfterCountdown)
+      
+      if (!item.running) return
+      
+      // 步骤5：开启平仓ID
+      item.statusText = `[步骤5/5] 正在开启平仓 ID ${item.closeHedgeId}...`
+      item.statusClass = 'status-running'
+      
+      const closeSuccess = await changeHedgeStatus(item.closeHedgeId, 0)
+      if (!closeSuccess) {
+        item.statusText = '[失败] 开启平仓ID失败'
+        item.statusClass = 'status-error'
+        item.running = false
+        return
+      }
+      
+      item.statusText = `[步骤5/5] 平仓 ID ${item.closeHedgeId} 已开启`
+      await sleep(2000) // 显示2秒
+      
+      // 检查是否有跳转序号
+      if (item.jumpToSequence && item.jumpToSequence > 0) {
+        const targetIndex = item.jumpToSequence - 1 // 序号从1开始，索引从0开始
+        if (targetIndex >= 0 && targetIndex < automationList.value.length) {
+          const targetItem = automationList.value[targetIndex]
+          item.statusText = `✓ 流程完成，准备跳转到序号 ${item.jumpToSequence}`
+          item.statusClass = 'status-completed'
+          item.running = false
+          item.checked = false
+          
+          showMessage(`自动化流程完成：ID ${item.hedgeId} → ${item.closeHedgeId}，即将跳转到序号 ${item.jumpToSequence}`, 'success')
+          
+          // 等待1秒后跳转执行
+          await sleep(1000)
+          
+          // 跳转执行，跳过第一步等待
+          runSingleAutomation(targetItem, true)
+        } else {
+          item.statusText = `✓ 流程完成（跳转序号 ${item.jumpToSequence} 无效）`
+          item.statusClass = 'status-completed'
+          item.running = false
+          item.checked = false
+          showMessage(`自动化流程完成：ID ${item.hedgeId} → ${item.closeHedgeId}（跳转序号无效）`, 'success')
+        }
+      } else {
+        item.statusText = `✓ 流程完成: ${item.hedgeId} → ${item.closeHedgeId}`
+        item.statusClass = 'status-completed'
+        item.running = false
+        item.checked = false
+        showMessage(`自动化流程完成：ID ${item.hedgeId} → ${item.closeHedgeId}`, 'success')
+      }
+    }
+    
     const monitorInterval = setInterval(async () => {
       if (!item.running) {
         clearInterval(monitorInterval)
@@ -1568,66 +1744,37 @@ const runSingleAutomation = async (item) => {
       const elapsed = Date.now() - startTime
       const remainingMinutes = Math.ceil((maxDuration - elapsed) / 60000)
       const elapsedMinutes = Math.floor(elapsed / 60000)
-      item.statusText = `[步骤3/5] 监控中 ID ${item.hedgeId}，已运行 ${elapsedMinutes} 分钟，剩余 ${remainingMinutes} 分钟`
       
-      // 检查是否超时且仍在运行
-      if (elapsed >= maxDuration) {
-        const hedgeItem = hedgeList.value.find(h => h.id === item.hedgeId)
-        if (hedgeItem && hedgeItem.status === 0) {
-          // 仍在运行，需要关闭
-          item.statusText = `[步骤3/5] 时间到，正在关闭 ID ${item.hedgeId}...`
-          await changeHedgeStatus(item.hedgeId, 1) // 1表示暂停
-          item.statusText = `[步骤3/5] ID ${item.hedgeId} 已关闭`
-          await sleep(2000) // 显示2秒
-        } else {
-          item.statusText = `[步骤3/5] ID ${item.hedgeId} 已自动关闭`
-          await sleep(2000) // 显示2秒
-        }
+      // 检查策略是否还在运行
+      const hedgeItem = hedgeList.value.find(h => h.id === item.hedgeId)
+      
+      // 如果策略已经自动停止，立即进入步骤4
+      if (hedgeItem && hedgeItem.status !== 0) {
+        item.statusText = `[步骤3/5] ID ${item.hedgeId} 已自动停止（运行了 ${elapsedMinutes} 分钟）`
+        await sleep(2000) // 显示2秒
         
         clearInterval(monitorInterval)
         
-        // 步骤4：等待关闭后的时间
-        item.statusClass = 'status-waiting'
-        const waitAfterStartTime = Date.now()
-        const waitAfterDuration = item.waitAfterClose * 60 * 1000
-        
-        // 显示等待倒计时
-        const waitAfterCountdown = setInterval(() => {
-          if (!item.running) {
-            clearInterval(waitAfterCountdown)
-            return
-          }
-          const elapsed = Date.now() - waitAfterStartTime
-          const remaining = Math.max(0, Math.ceil((waitAfterDuration - elapsed) / 60000))
-          item.statusText = `[步骤4/5] 等待执行平仓，剩余 ${remaining} 分钟`
-        }, 1000)
-        
-        await sleep(waitAfterDuration)
-        clearInterval(waitAfterCountdown)
-        
-        if (!item.running) return
-        
-        // 步骤5：开启平仓ID
-        item.statusText = `[步骤5/5] 正在开启平仓 ID ${item.closeHedgeId}...`
-        item.statusClass = 'status-running'
-        
-        const closeSuccess = await changeHedgeStatus(item.closeHedgeId, 0)
-        if (!closeSuccess) {
-          item.statusText = '[失败] 开启平仓ID失败'
-          item.statusClass = 'status-error'
-          item.running = false
-          return
-        }
-        
-        item.statusText = `[步骤5/5] 平仓 ID ${item.closeHedgeId} 已开启`
+        // 立即进入步骤4和步骤5
+        await executeStep4And5()
+        return
+      }
+      
+      // 更新监控状态
+      item.statusText = `[步骤3/5] 监控中 ID ${item.hedgeId}，已运行 ${elapsedMinutes} 分钟，剩余 ${remainingMinutes} 分钟`
+      
+      // 检查是否达到最大运行时间
+      if (elapsed >= maxDuration) {
+        // 时间到了，需要手动关闭策略
+        item.statusText = `[步骤3/5] 时间到，正在关闭 ID ${item.hedgeId}...`
+        await changeHedgeStatus(item.hedgeId, 1) // 1表示暂停
+        item.statusText = `[步骤3/5] ID ${item.hedgeId} 已手动关闭（运行了 ${elapsedMinutes} 分钟）`
         await sleep(2000) // 显示2秒
         
-        item.statusText = `✓ 流程完成: ${item.hedgeId} → ${item.closeHedgeId}`
-        item.statusClass = 'status-completed'
-        item.running = false
-        item.checked = false
+        clearInterval(monitorInterval)
         
-        showMessage(`自动化流程完成：ID ${item.hedgeId} → ${item.closeHedgeId}`, 'success')
+        // 进入步骤4和步骤5
+        await executeStep4And5()
       }
     }, 10000) // 每10秒检测一次
     
@@ -1696,7 +1843,8 @@ watch(
     hedgeId: item.hedgeId,
     openDuration: item.openDuration,
     waitAfterClose: item.waitAfterClose,
-    closeHedgeId: item.closeHedgeId
+    closeHedgeId: item.closeHedgeId,
+    jumpToSequence: item.jumpToSequence
   })),
   () => {
     // 防抖：500ms内如果有新的变化就重置定时器
@@ -2622,7 +2770,7 @@ main {
 .automation-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1100px;
+  min-width: 1300px;
 }
 
 .automation-table thead {
@@ -2647,6 +2795,10 @@ main {
   width: 60px;
 }
 
+.automation-table th.col-sequence {
+  width: 60px;
+}
+
 .automation-table th.col-auto-input {
   width: 150px;
 }
@@ -2664,6 +2816,20 @@ main {
 
 .automation-table td.col-auto-status {
   text-align: left;
+}
+
+.automation-table td.col-sequence {
+  text-align: center;
+}
+
+.sequence-number {
+  display: inline-block;
+  padding: 0.3rem 0.6rem;
+  background-color: #667eea;
+  color: white;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.9rem;
 }
 
 .automation-table tbody tr:hover {
@@ -2742,6 +2908,24 @@ main {
   justify-content: center;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.btn-select-all {
+  background-color: #6f42c1;
+  color: white;
+  border: none;
+  padding: 0.75rem 2rem;
+  font-size: 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-weight: 600;
+}
+
+.btn-select-all:hover {
+  background-color: #5a32a3;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(111, 66, 193, 0.4);
 }
 
 .btn-run-auto {
