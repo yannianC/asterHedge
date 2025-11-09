@@ -433,7 +433,7 @@ const allEndAlertEnabled = ref(false)
 const filterInput = ref('')
 
 // 自动刷新设置
-const autoRefreshEnabled = ref(false)
+const autoRefreshEnabled = ref(true) // 默认开启
 const autoRefreshInterval = ref(60) // 默认60秒
 let autoRefreshTimer = null
 
@@ -970,14 +970,14 @@ const toggleAutoRefresh = () => {
   } else {
     stopAutoRefresh()
   }
-  saveAutoRefreshSettings()
+  // 不保存到localStorage，每次刷新页面都默认打开
 }
 
 /**
- * 保存自动刷新设置到localStorage
+ * 保存自动刷新设置到localStorage（仅保存间隔时间）
  */
 const saveAutoRefreshSettings = () => {
-  localStorage.setItem('autoRefreshEnabled', autoRefreshEnabled.value ? '1' : '0')
+  // 不保存开关状态，只保存间隔时间
   localStorage.setItem('autoRefreshInterval', autoRefreshInterval.value.toString())
   
   // 如果已启用，重新启动定时器（间隔时间可能变化了）
@@ -987,15 +987,11 @@ const saveAutoRefreshSettings = () => {
 }
 
 /**
- * 从localStorage加载自动刷新设置
+ * 从localStorage加载自动刷新设置（仅加载间隔时间）
  */
 const loadAutoRefreshSettings = () => {
-  const enabled = localStorage.getItem('autoRefreshEnabled')
+  // 不读取开关状态，始终保持默认开启
   const interval = localStorage.getItem('autoRefreshInterval')
-  
-  if (enabled === '1') {
-    autoRefreshEnabled.value = true
-  }
   
   if (interval) {
     const intervalNum = parseInt(interval)
@@ -1004,10 +1000,8 @@ const loadAutoRefreshSettings = () => {
     }
   }
   
-  // 如果启用了自动刷新，启动定时器
-  if (autoRefreshEnabled.value) {
-    startAutoRefresh()
-  }
+  // 自动刷新默认开启，直接启动定时器
+  startAutoRefresh()
 }
 
 /**
