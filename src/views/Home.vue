@@ -544,7 +544,7 @@ const startHeartbeat = () => {
     if (ws) {
       ws.close()
     }
-  }, 30000) // 20秒
+  }, 60000) // 20秒
 }
 
 /**
@@ -1633,7 +1633,7 @@ const runSingleAutomation = async (item, skipWait = false) => {
         }
         const elapsed = Date.now() - startWaitTime
         const remaining = Math.max(0, Math.ceil((waitDuration - elapsed) / 60000))
-        item.statusText = `[步骤1/5] 初始等待中，剩余 ${remaining} 分钟`
+        item.statusText = `[步骤1/6] 初始等待中，剩余 ${remaining} 分钟`
       }, 1000)
       
       await sleep(waitDuration)
@@ -1643,7 +1643,7 @@ const runSingleAutomation = async (item, skipWait = false) => {
     }
     
     // 步骤2：开启对应ID的运行状态
-    item.statusText = `[步骤2/5] 正在开启 ID ${item.hedgeId} 的运行状态...`
+    item.statusText = `[步骤2/6] 正在开启 ID ${item.hedgeId} 的运行状态...`
     item.statusClass = 'status-running'
     
     const success = await changeHedgeStatus(item.hedgeId, 0) // 0表示运行中
@@ -1654,18 +1654,18 @@ const runSingleAutomation = async (item, skipWait = false) => {
       return
     }
     
-    item.statusText = `[步骤2/5] ID ${item.hedgeId} 已开启运行`
+    item.statusText = `[步骤2/6] ID ${item.hedgeId} 已开启运行`
     await sleep(2000) // 显示2秒
     
     // 步骤3：监控运行状态
     const startTime = Date.now()
     const maxDuration = item.openDuration * 60 * 1000
     
-    item.statusText = `[步骤3/5] 监控 ID ${item.hedgeId} 运行状态...`
+    item.statusText = `[步骤3/6] 监控 ID ${item.hedgeId} 运行状态...`
     item.statusClass = 'status-monitoring'
     
-    // 执行步骤4和步骤5的函数（提取出来避免重复代码）
-    const executeStep4And5 = async () => {
+    // 执行步骤4、5、6的函数（提取出来避免重复代码）
+    const executeStep4And5And6 = async () => {
       // 步骤4：等待关闭后的时间
       item.statusClass = 'status-waiting'
       const waitAfterStartTime = Date.now()
@@ -1679,7 +1679,7 @@ const runSingleAutomation = async (item, skipWait = false) => {
         }
         const elapsed = Date.now() - waitAfterStartTime
         const remaining = Math.max(0, Math.ceil((waitAfterDuration - elapsed) / 60000))
-        item.statusText = `[步骤4/5] 等待执行平仓，剩余 ${remaining} 分钟`
+        item.statusText = `[步骤4/6] 等待执行平仓，剩余 ${remaining} 分钟`
       }, 1000)
       
       await sleep(waitAfterDuration)
@@ -1688,7 +1688,7 @@ const runSingleAutomation = async (item, skipWait = false) => {
       if (!item.running) return
       
       // 步骤5：开启平仓ID
-      item.statusText = `[步骤5/5] 正在开启平仓 ID ${item.closeHedgeId}...`
+      item.statusText = `[步骤5/6] 正在开启平仓 ID ${item.closeHedgeId}...`
       item.statusClass = 'status-running'
       
       const closeSuccess = await changeHedgeStatus(item.closeHedgeId, 0)
@@ -1699,10 +1699,45 @@ const runSingleAutomation = async (item, skipWait = false) => {
         return
       }
       
-      item.statusText = `[步骤5/5] 平仓 ID ${item.closeHedgeId} 已开启`
+      item.statusText = `[步骤5/6] 平仓 ID ${item.closeHedgeId} 已开启，开始监控...`
       await sleep(2000) // 显示2秒
       
-      // 检查是否有跳转序号
+      // 步骤6：监控平仓ID运行状态
+      item.statusText = `[步骤6/6] 监控平仓 ID ${item.closeHedgeId} 运行状态...`
+      item.statusClass = 'status-monitoring'
+      
+      const closeStartTime = Date.now()
+      
+      // 创建一个Promise来等待监控完成
+      await new Promise((resolve) => {
+        const closeMonitorInterval = setInterval(() => {
+          if (!item.running) {
+            clearInterval(closeMonitorInterval)
+            resolve()
+            return
+          }
+          
+          const closeElapsedMinutes = Math.floor((Date.now() - closeStartTime) / 60000)
+          
+          // 检查平仓ID的状态
+          const closeHedgeItem = hedgeList.value.find(h => h.id === item.closeHedgeId)
+          
+          // 如果平仓ID已经关闭，则完成监控
+          if (closeHedgeItem && closeHedgeItem.status !== 0) {
+            item.statusText = `[步骤6/6] 平仓 ID ${item.closeHedgeId} 已完成（运行了 ${closeElapsedMinutes} 分钟）`
+            clearInterval(closeMonitorInterval)
+            resolve()
+            return
+          }
+          
+          // 更新监控状态
+          item.statusText = `[步骤6/6] 监控平仓中 ID ${item.closeHedgeId}，已运行 ${closeElapsedMinutes} 分钟`
+        }, 10000) // 每10秒检测一次
+      })
+      
+      await sleep(2000) // 显示2秒
+      
+      // 平仓ID已关闭，检查是否有跳转序号
       if (item.jumpToSequence && item.jumpToSequence > 0) {
         const targetIndex = item.jumpToSequence - 1 // 序号从1开始，索引从0开始
         if (targetIndex >= 0 && targetIndex < automationList.value.length) {
@@ -1750,31 +1785,31 @@ const runSingleAutomation = async (item, skipWait = false) => {
       
       // 如果策略已经自动停止，立即进入步骤4
       if (hedgeItem && hedgeItem.status !== 0) {
-        item.statusText = `[步骤3/5] ID ${item.hedgeId} 已自动停止（运行了 ${elapsedMinutes} 分钟）`
+        item.statusText = `[步骤3/6] ID ${item.hedgeId} 已自动停止（运行了 ${elapsedMinutes} 分钟）`
         await sleep(2000) // 显示2秒
         
         clearInterval(monitorInterval)
         
-        // 立即进入步骤4和步骤5
-        await executeStep4And5()
+        // 立即进入步骤4、5、6
+        await executeStep4And5And6()
         return
       }
       
       // 更新监控状态
-      item.statusText = `[步骤3/5] 监控中 ID ${item.hedgeId}，已运行 ${elapsedMinutes} 分钟，剩余 ${remainingMinutes} 分钟`
+      item.statusText = `[步骤3/6] 监控中 ID ${item.hedgeId}，已运行 ${elapsedMinutes} 分钟，剩余 ${remainingMinutes} 分钟`
       
       // 检查是否达到最大运行时间
       if (elapsed >= maxDuration) {
         // 时间到了，需要手动关闭策略
-        item.statusText = `[步骤3/5] 时间到，正在关闭 ID ${item.hedgeId}...`
+        item.statusText = `[步骤3/6] 时间到，正在关闭 ID ${item.hedgeId}...`
         await changeHedgeStatus(item.hedgeId, 1) // 1表示暂停
-        item.statusText = `[步骤3/5] ID ${item.hedgeId} 已手动关闭（运行了 ${elapsedMinutes} 分钟）`
+        item.statusText = `[步骤3/6] ID ${item.hedgeId} 已手动关闭（运行了 ${elapsedMinutes} 分钟）`
         await sleep(2000) // 显示2秒
         
         clearInterval(monitorInterval)
         
-        // 进入步骤4和步骤5
-        await executeStep4And5()
+        // 进入步骤4、5、6
+        await executeStep4And5And6()
       }
     }, 10000) // 每10秒检测一次
     
