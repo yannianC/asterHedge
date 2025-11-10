@@ -57,7 +57,8 @@
               <th class="col-narrow">开仓总金额</th>
               <th class="col-narrow">当前已开</th>
               <th class="col-single-open">单次开仓数量</th>
-              <th class="col-narrow">挂单账户单次数量</th>
+              <th class="col-narrow">1撤单后市价成交 <br>   
+                2撤单后不做处理</th>
               <th>挂单账户开仓类型</th>
               <th class="col-narrow">挂单账户预测仓位倍数</th>
               <th class="col-narrow">挂单账户预测净仓位倍数</th>
@@ -162,7 +163,7 @@
                 <input type="number" v-model="item.openModel2MaxUAmt" placeholder="仅模式2需要" :disabled="item.openModel !== 2" />
               </td>
               <td class="col-narrow">
-                <input type="number" v-model="item.openModel2Interval" placeholder="仅模式2需要" :disabled="item.openModel !== 2" />
+                <input type="number" v-model="item.openModel2Interval" placeholder="挂单后多少时间再去吃单" />
               </td>
               <td class="col-narrow">
                 <input type="number" v-model="item.waveMax" placeholder="0" />
@@ -1254,10 +1255,9 @@ const cleanCurrentOpen = async (item) => {
  * @param {Object} item - 对冲配置项
  */
 const handleOpenModelChange = (item) => {
-  // 当选择模式1时，清空模式2相关的字段（因为模式1不需要这些值）
+  // 当选择模式1时，清空深度挂单量最大值字段（openModel2Interval现在模式1也可以使用）
   if (item.openModel === 1) {
     item.openModel2MaxUAmt = ''
-    item.openModel2Interval = ''
   }
 }
 
@@ -1784,7 +1784,7 @@ const runSingleAutomation = async (item, skipWait = false) => {
         
         clearInterval(monitorInterval)
         
-        // 立即进入步骤4、5、6
+        // 即进入步骤4、5、6
         await executeStep4And5And6()
         return
       }
